@@ -128,16 +128,3 @@ json {
 
 
 /api/listTables                 =>列出系统内全部表
-
-
-await fetch('http://localhost:8080/api/logout', { 
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: "admin" }) 
-    });
-算了，你把登出接口也写进去吧，保持完整性
-@app.post("/api/logout")
-def logout(item: dict):
-    username = item.get("username")
-    print(f"用户 {username} 已安全退出系统")
-    return {"success": True}
