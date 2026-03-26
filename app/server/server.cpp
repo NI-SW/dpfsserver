@@ -1,16 +1,14 @@
-#include <DpfsApiDf.hpp>
-#include <fstream>
-#include <dpfsdebug.hpp>
 
 #define CROW_USE_BOOST
 #include <crow.h>
-#include <deepseek/deepseek.hpp>
-
 #include <iostream>
 #include <rapidjson/document.h>
 #include <rapidjson/error/en.h>
 #include <rapidjson/writer.h>
 #include <rapidjson/stringbuffer.h>
+#include <dcsystem/system.hpp>
+
+CSystem sys;
 
 int main(int argc, char* argv[]) {
 
@@ -24,65 +22,37 @@ int main(int argc, char* argv[]) {
     // std::getline(std::cin, userInput);
 
     // std::cout << "DeepSeek: " << client.Chat(userInput) << std::endl;
-
+    
     crow::SimpleApp app;
 
-
 #define __LOGIN_API__
-    CROW_ROUTE(app, "/login")
+    CROW_ROUTE(app, "/api/login")
         .methods("POST"_method)([](const crow::request& req) {
-            // 1. 获取请求体中的 JSON 字符串
-            std::string jsonStr = req.body;
-
-            std::cout << "Received JSON: " << jsonStr << std::endl;
-
-            // 2. 创建 RapidJSON Document 并解析
-            rapidjson::Document doc;
-            doc.Parse(jsonStr.c_str());
-
-            // 3. 检查解析是否成功
-            if (doc.HasParseError()) {
-                crow::json::wvalue error;
-                error["error"] = "Invalid JSON format";
-                error["details"] = rapidjson::GetParseError_En(doc.GetParseError());
-                error["offset"] = doc.GetErrorOffset();
-                return crow::response(400, error);
+            // get json string
+            int rc = 0;
+            std::cout << "Received JSON: " << req.body << std::endl;
+            std::string msg = "";
+            rc = sys.login(req.body, msg);
+            if (rc != 0) {
+                return crow::response(rc, msg);
             }
-
-            // 4. 验证根节点为对象
-            if (!doc.IsObject()) {
-                crow::json::wvalue error;
-                error["error"] = "Root must be a JSON object";
-                return crow::response(400, error);
+            auto res = crow::response(200, msg);
+            return res;
+        });
+    
+#define __LOGOUT_API__
+    CROW_ROUTE(app, "/api/logout")
+        .methods("POST"_method)([](const crow::request& req) {
+            // get json string
+            int rc = 0;
+            std::cout << "Received JSON: " << req.body << std::endl;
+            std::string msg = "";
+            rc = sys.logout(req.body, msg);
+            if (rc != 0) {
+                return crow::response(rc, msg);
             }
-
-            // 5. 提取字段并验证
-            if (!doc.HasMember("user") || !doc["user"].IsString()) {
-                crow::json::wvalue error;
-                error["error"] = "Missing or invalid 'user' field";
-                return crow::response(400, error);
-            }
-            if (!doc.HasMember("password") || !doc["password"].IsString()) {
-                crow::json::wvalue error;
-                error["error"] = "Missing or invalid 'password' field";
-                return crow::response(400, error);
-            }
-
-            std::string username = doc["user"].GetString();
-            std::string password = doc["password"].GetString();
-
-            // 模拟登录验证（这里简单演示，实际应查数据库）
-            if (username == "admin" && password == "secret") {
-                crow::json::wvalue result;
-                result["status"] = "success";
-                result["message"] = "Login successful";
-                return crow::response(200, result);
-            } else {
-                crow::json::wvalue error;
-                error["status"] = "error";
-                error["message"] = "Invalid credentials";
-                return crow::response(401, error);
-            }
+            auto res = crow::response(200, msg);
+            return res;
         });
 
 

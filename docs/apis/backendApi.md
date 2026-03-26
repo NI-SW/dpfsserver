@@ -7,7 +7,6 @@
 ```
 /api/login
 ```
-
 # METHOD
 ```
 POST
@@ -22,7 +21,7 @@ parameter                 | type
 ------------------------- | ----------------------------------
 code                      | Number
 message                   | String
-usertoken                 | Number
+user_token                | Number
 
 
 # URL
@@ -36,14 +35,17 @@ POST
 # Request
 parameter                 | type
 ------------------------- | ----------------------------------
-usertoken                 | String
+user_token                | Number
 # Response
 parameter                 | type
 ------------------------- | ----------------------------------
 code                      | Number
 message                   | String
 
-
+# 描述
+```
+创建溯源组，并生成风险评估报告
+```
 # URL
 ```
 /api/risk
@@ -55,49 +57,77 @@ POST
 # Request
 parameter                 | type
 ------------------------- | ----------------------------------
-usertoken                 | Number
+user_token                | Number
 schema                    | String
-proName                   | String
-proNumber                 | Number
+product_name              | String
+product_number            | Number
 ingredients               | List of (String, String) pairs
-baseInfo                  | List of (String, String) pairs
+base_info                 | List of (String, String) pairs
+# Response
+parameter                 | type
+------------------------- | ----------------------------------
+code                      | Number
+message                   | String
+risk_info                 | String
+# example
+```
+{
+  "user_token": 0,
+  "schema": "OOO",
+  "product_name": "烧烤酱",
+  "product_number": 10000,
+  "ingredients": [
+    ["鸡蛋", "50.00"],
+    ["糖", "15.5"]，
+    ["酱油", "34.5"]
+  ],
+  "base_info": [
+    ["key", "value"],
+    ["key", "value"]
+  ]
+}
+```
+
+# 描述
+```
+列出可溯源结构列表
+```
+# URL
+```
+/api/list_tracable_pro
+```
+# METHOD
+```
+GET
+```
+# Request
+parameter                 | type
+------------------------- | ----------------------------------
+user_token                | Number
 
 # Response
 parameter                 | type
 ------------------------- | ----------------------------------
 code                      | Number
 message                   | String
-riskInfo                  | String
+trace_pros                | Array of Objects
 
-
-
-/listTracablePro       =>列出全部可溯源组 
+# example
+```
 json {
 	code: 0 ,
 	message : "",
-	tabList [
-		"",
-		"",
-		""
+	trace_pros : [
+		{"group_name":"北京林业大学",product_name:"苹果派","trace_code_prefix":"00000000000000001D05000000000000"},
+		{"group_name":"北京林业大学",product_name:"香蕉派","trace_code_prefix":"00000000000000001D09000000000000"},
+		{"group_name":"北京林业大学",product_name:"草莓派","trace_code_prefix":"00000000000000001D01000000000000"}
 	]
 }
+```
 
 
 
-https://<ip>/risk     =》 风险评估
-
-
-/listTracablePro       =>列出全部可溯源组 
-json {
-	code: 0 ,
-	message : "",
-	tabList [
-		"",
-		"",
-		""
-	]
-}
-/listTables                 =>列出系统内全部表
+/api/listTables                 =>列出系统内全部表
 
 
 await fetch('http://localhost:8080/api/logout', { 
