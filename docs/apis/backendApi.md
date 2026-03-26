@@ -126,5 +126,48 @@ json {
 ```
 
 
+# 描述
+```
+根据表ID(TABLE_ID，系统表unique索引列)，列出系统内的表
+```
+# URL
+```
+/api/list_tables
+```
+# METHOD
+```
+GET
+```
+# Request
+parameter                 | type                              | describe
+------------------------- | ----------------------------------| ----------------------------------
+user_token                | Number                            |
+begin                     | Number                            | 提取表的起始ID
+limit                     | Number                            | 提取表的数量
 
-/api/listTables                 =>列出系统内全部表
+# Response
+parameter                 | type
+------------------------- | ----------------------------------
+code                      | Number
+message                   | String
+table_list                | Array of Objects
+# Array of table_list params
+parameter                 | type                              | describe
+------------------------- | ----------------------------------| ----------------------------------
+schema_name               | String                            | 
+table_name                | String                            |
+create_time               | String                            |
+key_cols                  | Number                            | 联合主键的数量
+TABLE_ID                  | Number                            |
+# example
+```
+json {
+	code: 0 ,
+	message : "",
+	trace_pros : [
+		{"schema_name":"SYSDPFS", "table_name":"SYSTABLES","create_time":"2026-03-27 00:53:51","key_cols":<主键数量>,"TABLE_ID":0},
+		{"group_name":"北京林业大学",product_name:"香蕉派","trace_code_prefix":"00000000000000001D09000000000000"},
+		{"group_name":"北京林业大学",product_name:"草莓派","trace_code_prefix":"00000000000000001D01000000000000"}
+	]
+}
+```
