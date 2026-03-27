@@ -102,22 +102,24 @@ risk_info                 | String
 GET
 ```
 # Request
-parameter                 | type
-------------------------- | ----------------------------------
-user_token                | Number
-begin                     | Number                            | 提取的起始位置
-limit                     | Number                            | 提取的数量
+parameter                 | type                               | describe  
+------------------------- | ---------------------------------- | 
+user_token                | Number                             | 
+begin                     | Number                             | 提取的起始位置
+limit                     | Number                             | 提取的数量
 # Response
-parameter                 | type
-------------------------- | ----------------------------------
-code                      | Number
-message                   | String
-trace_pros                | Array of Objects
+parameter                 | type                               | describe
+------------------------- | ---------------------------------- | ----------------------------------              
+code                      | Number                             | 
+message                   | String                             | 
+total                     | Number                             | 溯源结构总数(全部的数量，不是本次提取的数量)
+trace_pros                | Array of Objects                   | 溯源结构列表
 # example
 ```
 json {
   code: 0 ,
   message : "",
+  total: 128,
   trace_pros : [
     {"group_name":"北京林业大学",product_name:"苹果派","trace_code_prefix":"00000000000000001D05000000000000"},
     {"group_name":"北京林业大学",product_name:"香蕉派","trace_code_prefix":"00000000000000001D09000000000000"},
