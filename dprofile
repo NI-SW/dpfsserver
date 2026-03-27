@@ -1,0 +1,16 @@
+if [ $(uname) != 'Linux' ]; then
+    echo "This script not support on $(uname) platform, please check lib path manually."
+
+else 
+    dprofilePath=$(history -w /dev/stdout | awk 'END {print $2}')
+    dpfsPath=$(dirname $(readlink -f $dprofilePath))
+
+    echo dprofilePath=$dprofilePath
+    echo dpfsPath=$dpfsPath
+
+    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:\
+$dpfsPath/thirdparty/dpfsclient/lib:\
+$dpfsPath/lib
+
+fi
+# unset LD_LIBRARY_PATH
