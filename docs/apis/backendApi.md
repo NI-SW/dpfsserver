@@ -1,5 +1,5 @@
 
-## 溯源数据管理系统
+## 溯源数据管理系统API文档
 
 # base on Data Partitioned Foodtrace System
 
@@ -55,14 +55,15 @@ message                   | String
 POST
 ```
 # Request
-parameter                 | type
-------------------------- | ----------------------------------
-user_token                | Number
-schema                    | String
-product_name              | String
-product_number            | Number
-ingredients               | List of (String, String) pairs
-base_info                 | List of (String, String) pairs
+parameter                 | type                               | describe
+------------------------- | ---------------------------------- | ----------------------------------
+user_token                | Number                             | 
+schema                    | String                             | 
+product_name              | String                             | 
+product_number            | Number                             | 
+ingredients               | List of (String, String) pairs     | 
+base_info                 | List of (String, String) pairs     | 
+risk_report               | Number                             | 指定是否生成评估报告, 0 or 1
 # Response
 parameter                 | type
 ------------------------- | ----------------------------------
@@ -104,24 +105,87 @@ GET
 parameter                 | type
 ------------------------- | ----------------------------------
 user_token                | Number
-
+begin                     | Number                            | 提取的起始位置
+limit                     | Number                            | 提取的数量
 # Response
 parameter                 | type
 ------------------------- | ----------------------------------
 code                      | Number
 message                   | String
 trace_pros                | Array of Objects
-
 # example
 ```
 json {
-	code: 0 ,
-	message : "",
-	trace_pros : [
-		{"group_name":"北京林业大学",product_name:"苹果派","trace_code_prefix":"00000000000000001D05000000000000"},
-		{"group_name":"北京林业大学",product_name:"香蕉派","trace_code_prefix":"00000000000000001D09000000000000"},
-		{"group_name":"北京林业大学",product_name:"草莓派","trace_code_prefix":"00000000000000001D01000000000000"}
-	]
+  code: 0 ,
+  message : "",
+  trace_pros : [
+    {"group_name":"北京林业大学",product_name:"苹果派","trace_code_prefix":"00000000000000001D05000000000000"},
+    {"group_name":"北京林业大学",product_name:"香蕉派","trace_code_prefix":"00000000000000001D09000000000000"},
+    {"group_name":"北京林业大学",product_name:"草莓派","trace_code_prefix":"00000000000000001D01000000000000"}
+  ]
+}
+```
+
+# 描述
+```
+根据溯源码执行溯源操作
+```
+# URL
+```
+/api/trace_back
+```
+# METHOD
+```
+POST
+```
+# Request
+parameter                 | type                              | describe
+------------------------- | ----------------------------------| ----------------------------------
+user_token                | Number                            |
+trace_code                | String                            |
+detail                    | Number                            | 0 or 1, 是否返回详细信息
+# Response
+parameter                 | type
+------------------------- | ----------------------------------
+code                      | Number
+message                   | String
+trace_result              | String (40 Bytes)
+# example request
+```
+{
+  "user_token": 0,
+  "detail" : 1
+  "trace_code": "00000000000000001D050000000000000F000000"
+}
+```
+# example response
+```
+{
+  "code": 0,
+  "message": "",
+  "trace_result": "
+BASEINFOBEGIN: 1
+brand: 北京烤肉股份有限公司
+type: sause
+validDate: 2031-05-01
+BASEINFOEND: 1
+PRODUCTINFOBEGIN: 1
+uid/产品编号: 15
+ctime/上一次校验时间: 1774431892
+cstate/校验状态: 1
+ccount/校验次数: 1
+lastTradeId: null
+PRODUCTINFOEND: 1
+Ingredient Name: 白糖
+Ingredient Percentage: 75.00
+Ingredient Trace Code: 0000000000000000ce0400000000000000000000
+Ingredient Name: 食用油
+Ingredient Percentage: 10.00
+Ingredient Trace Code: 00000000000000000a0400000000000000000000
+Ingredient Name: 食盐
+Ingredient Percentage: 15.00
+Ingredient Trace Code: 00000000000000007f0400000000000000000000
+"
 }
 ```
 
@@ -162,12 +226,12 @@ TABLE_ID                  | Number                            |
 # response example
 ```
 json {
-	code: 0 ,
-	message : "",
-	trace_pros : [
-		{"schema_name":"SYSDPFS", "table_name":"SYSTABLES","create_time":"2026-03-27 00:53:51","key_cols":<主键数量>,"TABLE_ID":0},
-		{"schema_name":"SYSDPFS", "table_name":"SYSCOLUMNS","create_time":"2026-03-27 00:53:51","key_cols":<主键数量>,"TABLE_ID":1},
-		{"schema_name":"SYSDPFS", "table_name":"SYSUSERS","create_time":"2026-03-27 00:53:51","key_cols":<主键数量>,"TABLE_ID":2}
-	]
+  code: 0 ,
+  message : "",
+  trace_pros : [
+    {"schema_name":"SYSDPFS", "table_name":"SYSTABLES","create_time":"2026-03-27 00:53:51","key_cols":<主键数量>,"TABLE_ID":0},
+    {"schema_name":"SYSDPFS", "table_name":"SYSCOLUMNS","create_time":"2026-03-27 00:53:51","key_cols":<主键数量>,"TABLE_ID":1},
+    {"schema_name":"SYSDPFS", "table_name":"SYSUSERS","create_time":"2026-03-27 00:53:51","key_cols":<主键数量>,"TABLE_ID":2}
+  ]
 }
 ```
