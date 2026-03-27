@@ -99,7 +99,7 @@ risk_info                 | String
 ```
 # METHOD
 ```
-GET
+POST
 ```
 # Request
 parameter                 | type                               | describe  
@@ -116,7 +116,7 @@ total                     | Number                             | 溯源结构总
 trace_pros                | Array of Objects                   | 溯源结构列表
 # example
 ```
-json {
+{
   code: 0 ,
   message : "",
   total: 128,
@@ -202,7 +202,7 @@ Ingredient Trace Code: 00000000000000007f0400000000000000000000
 ```
 # METHOD
 ```
-GET
+POST
 ```
 # Request
 parameter                 | type                              | describe
@@ -210,7 +210,6 @@ parameter                 | type                              | describe
 user_token                | Number                            |
 begin                     | Number                            | 提取表的起始ID
 limit                     | Number                            | 提取表的数量
-
 # Response
 parameter                 | type
 ------------------------- | ----------------------------------
