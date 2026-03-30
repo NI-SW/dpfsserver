@@ -147,19 +147,22 @@ user_token                | Number                            |
 trace_code                | String (40 Bytes)                 |
 trace_detail              | Number                            | 0 or 1, 是否返回详细交易信息
 ingre_detail              | Number                            | 0 or 1, 是否返回详细配料信息
+ai_risk                   | Number                            | 0 or 1, 是否返回AI风险评估信息
 # Response
 parameter                 | type
 ------------------------- | ----------------------------------
 code                      | Number
 message                   | String
 trace_result              | String
+ai_risk_report            | String
 # example request
 ```
 {
   "user_token": 0,
   "trace_code": "00000000000000001D050000000000000F000000",
   "trace_detail": 1,
-  "ingre_detail": 0
+  "ingre_detail": 0,
+  "ai_risk": 1
 }
 ```
 # example response
