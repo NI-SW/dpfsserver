@@ -167,32 +167,67 @@ ai_risk_report            | String
 ```
 # example response
 ```
-{
-  "code": 0,
-  "message": "",
-  "trace_result": "
-BASEINFOBEGIN: 1
-brand: 北京烤肉股份有限公司
-type: sause
-validDate: 2031-05-01
-BASEINFOEND: 1
-PRODUCTINFOBEGIN: 1
-uid/产品编号: 15
-ctime/上一次校验时间: 1774431892
+{"code":200,"message":"","trace_result":"Base Info: {
 cstate/校验状态: 1
-ccount/校验次数: 1
-lastTradeId: null
-PRODUCTINFOEND: 1
-Ingredient Name: 白糖
-Ingredient Percentage: 75.00
-Ingredient Trace Code: 0000000000000000ce0400000000000000000000
-Ingredient Name: 食用油
-Ingredient Percentage: 10.00
-Ingredient Trace Code: 00000000000000000a0400000000000000000000
-Ingredient Name: 食盐
-Ingredient Percentage: 15.00
-Ingredient Trace Code: 00000000000000007f0400000000000000000000
-"
+ctime/上一次校验时间: 2026-03-30 10:51:34
+uid/产品编号: 15
+质量检测报告: https://mbd.baidu.com/newspage/data/dtlandingsuper?nid=dt_5393403645428020230&sourceFrom=search_a
+生产日期: 2026-01-01
+ccount/校验次数: 9
+名称: 富庄阁烤鸭酱料
+保质期: 1年
+}
+Trade Info: {
+}
+Ingredient Info: {
+Ingredient Percentage: 7.00
+Ingredient Name: 橄榄油
+child ingredient trace result: {
+Ingredient Base Info:
+ 过氧化值: 8.3
+ 质量报告: https://www.cqn.com.cn/ms/content/2019-01/04/content_6643996.htm
+ 种类: 特级初榨
+ 生产日期: 2026-03-01
+ 名称: 嘉禾特级初榨橄榄油
+ Ingredient Info:
+ Ingredient Percentage: 74.00
+ Ingredient Name: 单不饱和脂肪酸
+}
+-----------------
+Ingredient Percentage: 90.00
+Ingredient Name: 纯净水
+child ingredient trace result: {
+}
+-----------------
+Ingredient Percentage: 3.00
+Ingredient Name: 食用盐
+child ingredient trace result: {
+Ingredient Base Info:
+ 生产日期: 2026-3-29
+ 安全检测报告: http://www.yn.xinhuanet.com/20251209/138bdcccac144b17a3b86e84edb430d9/c.html
+ 品牌: 海天食用盐
+ 净含量: 500g
+ 保质期: 3年
+ Ingredient Info:
+ Ingredient Percentage: 100.00
+ Ingredient Name: 氯化钠
+}
+-----------------
+}
+","ai_risk_report":"
+**总体风险评估：低**  
+理由：产品校验状态正常（在有效期内），校验记录完整（校验次数9次），主要成分（水、橄榄油、食用盐）均有溯源信息，且原料生产日期与产品保质期匹配。
+
+**成分链风险分析：**  
+1. **橄榄油（7%）**：原料“嘉禾特级初榨橄榄油”过氧化值8.3（需对照国标判断是否超标），特级初榨橄榄油易氧化，需关注储存条件。  
+2. **纯净水（90%）**：无子成分溯源信息，但作为常见原料风险较低。  
+3. **食用盐（3%）**：原料“海天食用盐”有安全检测报告，氯化钠纯度100%，风险可控。
+
+**潜在风险点：**  
+1. **橄榄油氧化风险**：过氧化值数据需核对其是否符合≤10mmol/kg的国标要求，若接近上限可能存在油脂酸败隐患。  
+2. **纯净水溯源缺失**：未提供具体水源检测报告，存在微生物或污染物潜在风险。  
+3. **生产时间差**：橄榄油生产日期（2026-03-01）晚于酱料生产日期（2026-01-01），逻辑矛盾，可能影响原料新鲜度评估。  
+4. **链接报告时效性**：部分检测报告链接时间较早（如2019年），可能不反映当前批次质量。"
 }
 ```
 
