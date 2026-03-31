@@ -17,7 +17,7 @@ int main(int argc, char* argv[]) {
 
 
     initInfo.systemName = "dpfsserver";
-    initInfo.systemVersion = "1.0.0";
+    initInfo.systemVersion = "0.0.0.1";
     initInfo.apiKey = "";
     initInfo.connStr = "127.0.0.1:20500";
 
@@ -87,6 +87,51 @@ int main(int argc, char* argv[]) {
             return res;
         });
 
+#define __TRACE_BACK_API__
+    CROW_ROUTE(app, "/api/trace_back")
+        .methods("POST"_method)([](const crow::request& req) {
+            // get json string
+            int rc = 0;
+            std::cout << "Received JSON: " << req.body << std::endl;
+            std::string msg = "";
+            rc = sys.traceBack(req.body, msg);
+            if (rc != 0) {
+                return crow::response(rc, msg);
+            }
+            auto res = crow::response(200, msg);
+            return res;
+        });
+
+#define __MAKE_TRADE_API__
+    CROW_ROUTE(app, "/api/make_trade")
+        .methods("POST"_method)([](const crow::request& req) {
+            // get json string
+            int rc = 0;
+            std::cout << "Received JSON: " << req.body << std::endl;
+            std::string msg = "";
+            rc = sys.makeTrade(req.body, msg);
+            if (rc != 0) {
+                return crow::response(rc, msg);
+            }
+            auto res = crow::response(200, msg);
+            return res;
+        });
+        
+#define __LIST_PRO_BASIC_API__
+    CROW_ROUTE(app, "/api/list_pro_basic")
+        .methods("POST"_method)([](const crow::request& req) {
+            // get json string
+            int rc = 0;
+            std::cout << "Received JSON: " << req.body << std::endl;
+            std::string msg = "";
+            rc = sys.listProBasic(req.body, msg);
+            if (rc != 0) {
+                return crow::response(rc, msg);
+            }
+            auto res = crow::response(200, msg);
+            return res;
+        });
+        
     app.port(20510).multithreaded().run();
 
     return 0;

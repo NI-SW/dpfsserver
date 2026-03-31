@@ -5,6 +5,15 @@
 #include <rapidjson/stringbuffer.h>
 #include <deepseek/deepseek.hpp>
 #include <fstream>
+
+#include "rapidjson/prettywriter.h"
+
+#define __SERVER_DEBUG__
+
+#ifdef __SERVER_DEBUG__
+#include <dpfsdebug.hpp>
+#endif
+
 enum class jsonFieldType : uint8_t {
     IsString = 0,
     IsInt64,
@@ -16,6 +25,7 @@ enum class jsonFieldType : uint8_t {
 std::string g_connStr = "127.0.0.1:20500";
 std::string g_apiKey = "";
 std::string g_aiPromptTemplate = "";
+std::string g_aiPromptTemplate4trace = "";
 
 CSystem::CSystem() {
 
@@ -40,6 +50,14 @@ int CSystem::init(const initSystemInfo& initInfo) {
     g_aiPromptTemplate = std::string(buf);
     promptFile.close();
 
+    std::fstream promptFile4Trace("prompt.trace", std::ios::in);
+    if (!promptFile4Trace.is_open()) {
+        return -EIO;
+    }
+    char buf4Trace[65535] {0};
+    promptFile4Trace.read(buf4Trace, sizeof(buf4Trace) - 1);
+    g_aiPromptTemplate4trace = std::string(buf4Trace);
+    promptFile4Trace.close();
     return 0;
 }
 
@@ -374,6 +392,7 @@ trace_pros                | Array of Objects                   | 溯源结构列
             break;
         }
     }
+
     docRet.AddMember("total", total, allocator);
     docRet.AddMember("trace_pros", traceProArr, allocator);
 
@@ -519,6 +538,13 @@ int CSystem::risk(const std::string& request, std::string& response) {
             genResponseReturn(400, "Invalid 'ingredients' field, must be an array of (string, string) pairs", response);
             return 400;
         }
+
+        // name should not same with product_name
+        if (strcmp(item[0].GetString(), doc["product_name"].GetString()) == 0) {
+            genResponseReturn(400, "Ingredient name should not be same with product name", response);
+            return 400;
+        }
+
         ingredients[item[0].GetString()] = item[1].GetString();
     }
     std::map<std::string, std::string> base_info;
@@ -608,9 +634,9 @@ Ingredient Trace Code: 0000000000000000c40400000000000000000000
 Ingredient Percentage: 50.00
 Ingredient Name: 食盐
 -----------------
-
 */
-int CSystem::recursiveTrace(const std::string& trace_code, CGrpcCli& client, std::string& result, std::string indent) {
+
+int CSystem::recursiveTrace(const std::string& trace_code, CGrpcCli& client, std::string& result, std::string indent, void* tDoc, void* parentDoc) {
     int rc = 0;
     std::string trace_result;
     // trace current ingredient
@@ -626,6 +652,34 @@ int CSystem::recursiveTrace(const std::string& trace_code, CGrpcCli& client, std
         return rc;
     }
 
+    auto addMember = [parentDoc](void* tDoc, const std::string& key, const std::string& value) {
+        if (tDoc && parentDoc) {
+            static_cast<rapidjson::Document*>(tDoc)->AddMember(
+                rapidjson::Value(key.c_str(), static_cast<rapidjson::Document*>(parentDoc)->GetAllocator()), 
+                rapidjson::Value(value.c_str(), static_cast<rapidjson::Document*>(parentDoc)->GetAllocator()), 
+                static_cast<rapidjson::Document*>(parentDoc)->GetAllocator());
+        }
+    };
+
+    auto addObject = [parentDoc](void* tDoc, const std::string& key, rapidjson::Document& target) {
+        if (tDoc && parentDoc) {
+            rapidjson::Document& doc = *static_cast<rapidjson::Document*>(tDoc);
+            doc.AddMember(
+                rapidjson::Value(key.c_str(), static_cast<rapidjson::Document*>(parentDoc)->GetAllocator()), 
+                target, 
+                static_cast<rapidjson::Document*>(parentDoc)->GetAllocator());
+        }
+        
+    };
+
+    auto printDoc = [](rapidjson::Document& doc){
+        rapidjson::StringBuffer bufferTdoc;
+        rapidjson::PrettyWriter<rapidjson::StringBuffer> writerTd(bufferTdoc);
+        doc.Accept(writerTd);
+        cout << bufferTdoc.GetString() << endl;
+    };
+
+    // base info
     std::string ingredientBaseInfo = "Ingredient Base Info:\n";
     for (const auto& [key, value] : tresult.base_info) {
         if (memcmp(key.c_str(), "ccount", 6) == 0) {
@@ -639,30 +693,58 @@ int CSystem::recursiveTrace(const std::string& trace_code, CGrpcCli& client, std
         }
 
         ingredientBaseInfo += indent + key + ": " + value + "\n";
+        addMember(tDoc, key, value);
     }
     result += ingredientBaseInfo;
 
+    rapidjson::Document ingArrayDoc;
+    ingArrayDoc.SetArray();
+    
+    // for each ingredient, add to array
     for (const auto& ingredient : tresult.ingredient_info) {
         std::string ingredientInfoStr = indent + "Ingredient Info:\n";
         std::string childTraceCode;
-        for (const auto& [key, value] : ingredient.ingredient_info) {
 
+        // for this ingredient, create a json object
+        rapidjson::Document ingredientDoc;
+        ingredientDoc.SetObject();
+        // ingredient base info
+        for (const auto& [key, value] : ingredient.ingredient_info) {
+            // cout << indent << key << ": " << value << endl;
             if (memcmp(key.c_str(), "Ingredient Trace Code", 21) == 0) {
                 childTraceCode = value;
                 continue;
             }
+            
             ingredientInfoStr += indent + key + ": " + value + "\n";
-        }
-        result += ingredientInfoStr;
-
-        if (!childTraceCode.empty()) {
-            // result += indent + "Tracing child ingredient with trace code: " + childTraceCode + "\n";
-            rc = recursiveTrace(childTraceCode, client, result, indent + "  ");
-            if (rc != 0) {
-                return rc;
+            if (tDoc && parentDoc) {
+                ingredientDoc.AddMember(
+                    rapidjson::Value(key.c_str(), static_cast<rapidjson::Document*>(parentDoc)->GetAllocator()), 
+                    rapidjson::Value(value.c_str(), static_cast<rapidjson::Document*>(parentDoc)->GetAllocator()), 
+                    static_cast<rapidjson::Document*>(parentDoc)->GetAllocator());
             }
         }
+
+        result += ingredientInfoStr;
+
+        // if has child trace code, recursive trace child ingredient
+        if (!childTraceCode.empty()) {
+            // result += indent + "Tracing child ingredient with trace code: " + childTraceCode + "\n";
+            rapidjson::Document childDoc;
+            childDoc.SetObject();
+            // cout << "trace back child ingredient with trace code: " << childTraceCode << endl;
+            rc = recursiveTrace(childTraceCode, client, result, indent + "  ", &childDoc, parentDoc);
+            if (rc == 0) {
+                addObject(&ingredientDoc, "IngredientInfo", childDoc);
+            }
+        }
+        
+        if (tDoc && parentDoc) {
+            ingArrayDoc.PushBack(ingredientDoc, static_cast<rapidjson::Document*>(parentDoc)->GetAllocator());
+        }
     }
+    
+    addObject(tDoc, "IngredientInfo", ingArrayDoc);
 
     return 0;
 }
@@ -738,5 +820,482 @@ ignore:
 
     cout << risk_info << endl;
     // risk_info = "This is a mock risk report generated based on the trace result. You can replace this with actual logic to analyze the trace result and generate a meaningful risk report.";
+    return 0;
+}
+
+/*
+# Request
+parameter                 | type                              | describe
+------------------------- | ----------------------------------| ----------------------------------
+user_token                | Number                            |
+trace_code                | String (40 Bytes)                 |
+trace_detail              | Number                            | 0 or 1, 是否返回详细交易信息
+ingre_detail              | Number                            | 0 or 1, 是否返回详细配料信息
+*/
+int CSystem::traceBack(const std::string& request, std::string& response) {
+    
+
+    int rc = 0;
+    const std::string& jsonStr = request;
+
+    // create doc and parse json string
+    rapidjson::Document doc;
+    doc.Parse(jsonStr.c_str());
+
+    // check success
+    if (doc.HasParseError()) {
+        genResponseReturn(400, std::string(rapidjson::GetParseError_En(doc.GetParseError())), response);
+        return 400;
+    }
+
+    // check json type
+    if (!doc.IsObject()) {
+        genResponseReturn(400, "Root must be a JSON object", response);
+        return 400;
+    }
+
+    // check username and password field
+    int64_t trace_defail = 0;
+    int64_t ingDet = 0;
+    int64_t aiRisk = 0;
+
+    rc = checkJsonFormat(doc, "user_token", jsonFieldType::IsInt64, response); if (rc != 0) { return rc; }
+    rc = checkJsonFormat(doc, "trace_code", jsonFieldType::IsString, response); if (rc != 0) { return rc; }
+    rc = checkJsonFormat(doc, "trace_detail", jsonFieldType::IsInt64, response); if (rc == 0) { trace_defail = doc["trace_detail"].GetInt64(); }
+    rc = checkJsonFormat(doc, "ingre_detail", jsonFieldType::IsInt64, response); if (rc == 0) { ingDet = doc["ingre_detail"].GetInt64(); }
+    rc = checkJsonFormat(doc, "ai_risk", jsonFieldType::IsInt64, response); if (rc == 0) { aiRisk = doc["ai_risk"].GetInt64(); }
+
+    rapidjson::Document tDoc;
+    tDoc.SetObject();
+
+    auto printDoc = [](rapidjson::Document& doc){
+        rapidjson::StringBuffer bufferTdoc;
+        rapidjson::PrettyWriter<rapidjson::StringBuffer> writerTd(bufferTdoc);
+        doc.Accept(writerTd);
+        cout << bufferTdoc.GetString() << endl;
+    };
+
+    CGrpcCli* client = nullptr;
+    this->checkUserToken(doc["user_token"].GetInt64(), client);
+    if (client == nullptr) {
+        genResponseReturn(400, "Invalid user token", response);
+        return 400;
+    }
+
+    std::string tc = hex2Binary(doc["trace_code"].GetString());
+    if (tc.size() != 20) {
+        genResponseReturn(400, "Invalid trace code, must be 40 hex characters representing 20 bytes", response);
+        return 400;
+    }
+
+    std::string trace_result;
+    cout << "show detail : " << (bool)trace_defail << endl;
+    rc = client->traceBack(tc, trace_result, trace_defail == 0 ? false : true);
+    if (rc != 0) {
+        genResponseReturn(rc, client->msg, response);
+        return rc;
+    }
+    cout << "trace back result : " << trace_result << endl;
+
+    CGrpcCli::CResult tresult;
+    rc = client->parseTraceResult(trace_result, tresult);
+    if (rc != 0) {
+        genResponseReturn(rc, client->msg, response);
+        return rc;
+    }    
+    std::string aiRiskStr = "";
+    aiRiskStr.reserve(1024);
+    std::vector<std::string> recursiveTraceCodes;
+    recursiveTraceCodes.reserve(tresult.ingredient_info.size());
+
+    // Base Info
+    std::string traceBaseResult = "Base Info: {\n";
+    traceBaseResult.reserve(512);
+    for (const auto& [key, value] : tresult.base_info) {
+        if (memcmp(key.c_str(), "ctime", 5) == 0) {
+            // convert unix timestamp to human readable time
+            time_t timestamp = std::stoll(value);
+            struct tm* timeinfo = localtime(&timestamp);
+            char buffer[80];
+            strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", timeinfo);
+            traceBaseResult += key + ": " + std::string(buffer) + "\n";
+            tDoc.AddMember(rapidjson::Value(key.c_str(), tDoc.GetAllocator()), rapidjson::Value(buffer, tDoc.GetAllocator()), tDoc.GetAllocator());
+            continue;
+        }
+        traceBaseResult += key + ": " + value + "\n";
+        tDoc.AddMember(rapidjson::Value(key.c_str(), tDoc.GetAllocator()), rapidjson::Value(value.c_str(), tDoc.GetAllocator()), tDoc.GetAllocator());
+
+    }
+    
+    traceBaseResult += "}\n";
+
+    // trade Info
+    std::string traceTradeInfo = "Trade Info: {\n";
+    traceTradeInfo.reserve(2048);
+
+    rapidjson::Document TradeArrayDoc;
+    TradeArrayDoc.SetArray();
+    for (const auto& trade : tresult.trade_info) {
+        rapidjson::Document tradeDoc;
+        tradeDoc.SetObject();
+        for (const auto& [key, value] : trade.trade_info) {
+            cout << "add trade info: " << key << ": " << value << endl;
+            traceTradeInfo += "\"" + key + "\": " + value + "\n";
+            tradeDoc.AddMember(rapidjson::Value(key.c_str(), TradeArrayDoc.GetAllocator()), rapidjson::Value(value.c_str(), TradeArrayDoc.GetAllocator()), TradeArrayDoc.GetAllocator());
+        }
+        traceTradeInfo += "-----------------\n";
+        TradeArrayDoc.PushBack(tradeDoc, TradeArrayDoc.GetAllocator());
+    }
+    tDoc.AddMember("trade_info", TradeArrayDoc, tDoc.GetAllocator());
+    
+    traceTradeInfo += "}\n";
+
+    // ingredient Info
+    std::string ingredientInfoStr = "Ingredient Info: {\n";
+    ingredientInfoStr.reserve(1024);
+
+    rapidjson::Document ingredientArrayDoc;
+    ingredientArrayDoc.SetArray();
+    
+    for (const auto& ingredient : tresult.ingredient_info) {
+        rapidjson::Document ingredientDoc;
+        ingredientDoc.SetObject();
+        for (const auto& [key, value] : ingredient.ingredient_info) {
+            if (memcmp(key.c_str(), "Ingredient Trace Code", 21) == 0) {
+                recursiveTraceCodes.emplace_back(value);
+                continue;
+            }
+            ingredientInfoStr += key + ": " + value + "\n";
+            // cout << "Adding ingredient info to document, key: " << key << ", value: " << value << endl;
+            ingredientDoc.AddMember(
+                rapidjson::Value(key.c_str(), tDoc.GetAllocator()),
+                rapidjson::Value(value.c_str(), tDoc.GetAllocator()),
+                tDoc.GetAllocator()
+            );
+        }
+        if (ingDet == 1) {
+            // cout << "recursive tracing this ingredient..." << endl;
+            ingredientInfoStr += "child ingredient trace result: {\n";
+            rapidjson::Document childDoc;
+            childDoc.SetObject();
+            int rc = recursiveTrace(recursiveTraceCodes.back(), *client, ingredientInfoStr, " ", &childDoc, &tDoc);
+            if (rc != 0) {
+                // ingredientInfoStr += "recursive trace failed for trace code: " + recursiveTraceCodes.back() + ", error code: " + std::to_string(rc) + ", message: " + client.msg + "\n";
+            }
+            ingredientInfoStr += "}\n";
+            // Merge childDoc into tDoc
+            ingredientDoc.AddMember(rapidjson::Value("IngredientInfo", tDoc.GetAllocator()), childDoc, tDoc.GetAllocator());
+        }
+        
+        ingredientInfoStr += "-----------------\n";
+        ingredientArrayDoc.PushBack(ingredientDoc, tDoc.GetAllocator());
+    }
+    tDoc.AddMember("ingredient_info", ingredientArrayDoc, tDoc.GetAllocator());
+    // printDoc(tDoc);
+    ingredientInfoStr += "}\n";
+
+    if (aiRisk == 1) {
+        const std::string& apiKey = g_apiKey;
+        DeepSeekClient dclient(apiKey);
+        std::string userInput;
+        userInput += g_aiPromptTemplate4trace;
+        userInput += traceBaseResult + "\n" + traceTradeInfo + "\n" + ingredientInfoStr + "\n";
+        aiRiskStr = dclient.Chat(userInput);
+    }
+
+    rapidjson::StringBuffer tbuffer;
+    rapidjson::Writer<rapidjson::StringBuffer> twriter(tbuffer);
+    tDoc.Accept(twriter);
+    std::string tDocStr = tbuffer.GetString();
+
+
+    rapidjson::Document retDoc;
+    retDoc.SetObject();
+    auto& allocator = retDoc.GetAllocator();
+    retDoc.AddMember("code", 200, allocator);
+    retDoc.AddMember("message", "", allocator);
+    // std::string combinedResult = ; // traceBaseResult + traceTradeInfo + ingredientInfoStr;
+    retDoc.AddMember("trace_result", rapidjson::Value(tDocStr.c_str(), allocator), allocator);
+    retDoc.AddMember("ai_risk_report", rapidjson::Value(aiRiskStr.c_str(), allocator), allocator);
+
+    rapidjson::StringBuffer buffer;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+    retDoc.Accept(writer);
+    response = buffer.GetString();
+
+
+
+    return 0;
+}
+
+int CSystem::listProBasic(const std::string& request, std::string& response) {
+
+    int rc = 0;
+    const std::string& jsonStr = request;
+
+    // create doc and parse json string
+    rapidjson::Document doc;
+    doc.Parse(jsonStr.c_str());
+    rapidjson::Document retDoc;
+    retDoc.SetObject();
+
+    // check success
+    if (doc.HasParseError()) {
+        genResponseReturn(400, std::string(rapidjson::GetParseError_En(doc.GetParseError())), response);
+        return 400;
+    }
+
+    // check json type
+    if (!doc.IsObject()) {
+        genResponseReturn(400, "Root must be a JSON object", response);
+        return 400;
+    }
+
+    // check username and password field
+    std::string schema = "";
+    std::string name = "";
+
+    rc = checkJsonFormat(doc, "user_token", jsonFieldType::IsInt64, response); if (rc != 0) { return rc; }
+    rc = checkJsonFormat(doc, "schema", jsonFieldType::IsString, response); if (rc == 0) { schema = doc["schema"].GetString(); }
+    rc = checkJsonFormat(doc, "name", jsonFieldType::IsString, response); if (rc == 0) { name = doc["name"].GetString(); }
+
+
+
+
+    CGrpcCli* client = nullptr;
+    this->checkUserToken(doc["user_token"].GetInt64(), client);
+    if (client == nullptr) {
+        genResponseReturn(400, "Invalid user token", response);
+        return 400;
+    }
+
+    // get info from pro_SPXXB table
+    std::string spxxb = name + "_SPXXB";
+    rc = client->getTableHandle(schema, spxxb);
+    if (rc != 0) {
+        genResponseReturn(rc, client->msg, response);
+        return rc;
+    }
+    
+    int32_t hidx = 0;
+    std::vector<std::string> idxNames;
+    // get data from begin
+    rc = client->getIdxIter(idxNames, {}, hidx);
+    if (rc != 0) {
+        genResponseReturn(rc, client->msg, response);
+        return rc;
+    }
+
+
+    rapidjson::Document basicInfoArrDoc;
+    basicInfoArrDoc.SetArray();
+    while (client->fetchNextRow(hidx) == 0) {
+        // col[0] - > key
+        // col[1] -> value
+        rapidjson::Document basicInfoObj;
+        basicInfoObj.SetObject();
+
+        std::string oval = "";
+        rc = client->getDataByIdxIter(hidx, 0, oval, dpfs_ctype_t::TYPE_STRING);
+        if (rc != 0) {
+            genResponseReturn(rc, client->msg, response);
+            return rc;
+        }
+        if (memcmp(oval.c_str(), "SPKZB", 5) == 0 || 
+            memcmp(oval.c_str(), "PLKZB", 5) == 0 ||
+            memcmp(oval.c_str(), "SPJYB", 5) == 0) {
+            // this is the trace code column, skip
+            continue;
+        }
+        basicInfoObj.AddMember("key", rapidjson::Value(oval.c_str(), basicInfoArrDoc.GetAllocator()), basicInfoArrDoc.GetAllocator());
+
+        rc = client->getDataByIdxIter(hidx, 1, oval, dpfs_ctype_t::TYPE_STRING);
+        if (rc != 0) {
+            genResponseReturn(rc, client->msg, response);
+            return rc;
+        }
+        cout << "value: " << oval << endl;
+        basicInfoObj.AddMember("value", rapidjson::Value(oval.c_str(), basicInfoArrDoc.GetAllocator()), basicInfoArrDoc.GetAllocator());
+
+        basicInfoArrDoc.PushBack(basicInfoObj, basicInfoArrDoc.GetAllocator());
+    }
+
+    client->releaseIdxIter(hidx);
+    client->releaseTableHandle();
+
+
+    // get ingredient info from pro_PLKZB table
+    std::string plkzb = name + "_PLKZB";
+    rc = client->getTableHandle(schema, plkzb);
+    if (rc != 0) {
+        cout << "Get table handle failed for table: " << schema << "." << plkzb << ", error code: " << rc << ", message: " << client->msg << endl;
+        genResponseReturn(rc, client->msg, response);
+        return rc;
+    }
+
+    hidx = 0;
+    idxNames.clear();
+    // get data from begin
+    rc = client->getIdxIter(idxNames, {}, hidx);
+    if (rc != 0) {
+        cout << "Get index iterator failed for table: " << schema << "." << plkzb << ", error code: " << rc << ", message: " << client->msg << endl;
+        genResponseReturn(rc, client->msg, response);
+        return rc;
+    }
+
+    const auto& colInfo = client->getColInfo(hidx);
+
+
+    rapidjson::Document ingreInfoArrDoc;
+    ingreInfoArrDoc.SetArray();
+    while (client->fetchNextRow(hidx) == 0) {
+        // col[0] - > key
+        // col[1] -> value
+        rapidjson::Document ingInfoObj;
+        ingInfoObj.SetObject();
+
+        std::string oval = "";
+        // ing name
+        rc = client->getDataByIdxIter(hidx, 0, oval);
+        if (rc != 0) {
+            genResponseReturn(rc, client->msg, response);
+            return rc;
+        }
+        ingInfoObj.AddMember("ingre_name", rapidjson::Value(oval.c_str(), ingreInfoArrDoc.GetAllocator()), ingreInfoArrDoc.GetAllocator());
+
+        // ing trace code prefix
+        rc = client->getDataByIdxIter(hidx, 1, oval);
+        if (rc != 0) {
+            genResponseReturn(rc, client->msg, response);
+            return rc;
+        }
+        std::string trace_code_prefix = toHexString((uint8_t*)oval.data(), oval.size());
+        ingInfoObj.AddMember("trace_code_prefix", rapidjson::Value(trace_code_prefix.c_str(), ingreInfoArrDoc.GetAllocator()), ingreInfoArrDoc.GetAllocator());
+
+        // ing percentage
+        rc = client->getDataByIdxIter(hidx, 2, oval);
+        if (rc != 0) {
+            genResponseReturn(rc, client->msg, response);
+            return rc;
+        }
+
+        {
+            // convert decimal binary to string
+            my_decimal dec;
+            rc = binary2my_decimal(0, (const uchar*)oval.data(), &dec, colInfo[2].getDds().genLen, colInfo[2].getScale());
+            if (rc != 0) {
+                cout << "Convert binary to decimal failed, error code: " << rc << endl;
+                return rc;
+            }
+            String decStr;
+            rc = my_decimal2string(0, &dec, &decStr);
+            if (rc != 0) {
+                cout << "Convert decimal to string failed, error code: " << rc << endl;
+                return rc;
+            }
+            ingInfoObj.AddMember("percentage", rapidjson::Value(decStr.ptr(), ingreInfoArrDoc.GetAllocator()), ingreInfoArrDoc.GetAllocator());
+        }
+
+        ingreInfoArrDoc.PushBack(ingInfoObj, ingreInfoArrDoc.GetAllocator());
+    }
+    client->releaseIdxIter(hidx);
+
+    retDoc.AddMember("code", 200, retDoc.GetAllocator());
+    retDoc.AddMember("message", "", retDoc.GetAllocator());
+    retDoc.AddMember("basic_info", basicInfoArrDoc, retDoc.GetAllocator());
+    retDoc.AddMember("ingredient_info", ingreInfoArrDoc, retDoc.GetAllocator());
+
+    rapidjson::StringBuffer buffer;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+    retDoc.Accept(writer);
+    response = buffer.GetString();
+
+    return 0;
+}
+
+int CSystem::makeTrade(const std::string& request, std::string& response) {
+
+    int rc = 0;
+    const std::string& jsonStr = request;
+
+    // create doc and parse json string
+    rapidjson::Document doc;
+    doc.Parse(jsonStr.c_str());
+
+    // check success
+    if (doc.HasParseError()) {
+        genResponseReturn(400, std::string(rapidjson::GetParseError_En(doc.GetParseError())), response);
+        return 400;
+    }
+
+    // check json type
+    if (!doc.IsObject()) {
+        genResponseReturn(400, "Root must be a JSON object", response);
+        return 400;
+    }
+
+    // check username and password field
+    std::string tradeSchema = "";
+    std::string tradeProductName = "";
+    int64_t tradeProductStartID = 0;
+    int64_t tradeProductNumber = 0;
+    std::string buyer = "";
+    std::string buyerAddr = "";
+    std::string buyerPhone = "";
+    std::string seller = "";
+    std::string sellerAddr = "";
+    std::string sellerPhone = "";
+    std::string logisticsInfo = "";
+    std::string otherInfo = "";
+    std::string tradePrice = "";
+
+    rc = checkJsonFormat(doc, "user_token", jsonFieldType::IsInt64, response); if (rc != 0) { return rc; }
+    rc = checkJsonFormat(doc, "trade_schema", jsonFieldType::IsString, response); if (rc == 0) { tradeSchema = doc["trade_schema"].GetString(); }
+    rc = checkJsonFormat(doc, "trade_product_name", jsonFieldType::IsString, response); if (rc == 0) { tradeProductName = doc["trade_product_name"].GetString(); }
+    rc = checkJsonFormat(doc, "trade_product_start_id", jsonFieldType::IsInt64, response); if (rc == 0) { tradeProductStartID = doc["trade_product_start_id"].GetInt64(); }
+    rc = checkJsonFormat(doc, "trade_product_number", jsonFieldType::IsInt64, response); if (rc == 0) { tradeProductNumber = doc["trade_product_number"].GetInt64(); }
+    rc = checkJsonFormat(doc, "buyer", jsonFieldType::IsString, response); if (rc == 0) { buyer = doc["buyer"].GetString(); }
+    rc = checkJsonFormat(doc, "buyer_addr", jsonFieldType::IsString, response); if (rc == 0) { buyerAddr = doc["buyer_addr"].GetString(); }
+    rc = checkJsonFormat(doc, "buyer_phone", jsonFieldType::IsString, response); if (rc == 0) { buyerPhone = doc["buyer_phone"].GetString(); }
+    rc = checkJsonFormat(doc, "seller", jsonFieldType::IsString, response); if (rc == 0) { seller = doc["seller"].GetString(); }
+    rc = checkJsonFormat(doc, "seller_addr", jsonFieldType::IsString, response); if (rc == 0) { sellerAddr = doc["seller_addr"].GetString(); }
+    rc = checkJsonFormat(doc, "seller_phone", jsonFieldType::IsString, response); if (rc == 0) { sellerPhone = doc["seller_phone"].GetString(); }
+    rc = checkJsonFormat(doc, "logistics_info", jsonFieldType::IsString, response); if (rc == 0) { logisticsInfo = doc["logistics_info"].GetString(); }
+    rc = checkJsonFormat(doc, "other_info", jsonFieldType::IsString, response); if (rc == 0) { otherInfo = doc["other_info"].GetString(); }
+    rc = checkJsonFormat(doc, "trade_price", jsonFieldType::IsString, response); if (rc == 0) { tradePrice = doc["trade_price"].GetString(); }
+
+    if ( tradeSchema == "" || tradeProductName == "") {
+        genResponseReturn(400, "Invalid Param", response);
+        return 400;
+    }
+
+    if (buyer == "")            { genResponseReturn(400, "Invalid Param", response); return 400; };
+    if (buyerAddr == "")        { genResponseReturn(400, "Invalid Param", response); return 400; };
+    if (buyerPhone == "")       { genResponseReturn(400, "Invalid Param", response); return 400; };
+    if (seller == "")           { genResponseReturn(400, "Invalid Param", response); return 400; };
+    if (sellerAddr == "")       { genResponseReturn(400, "Invalid Param", response); return 400; };
+    if (sellerPhone == "")      { genResponseReturn(400, "Invalid Param", response); return 400; };
+    if (logisticsInfo == "")    { genResponseReturn(400, "Invalid Param", response); return 400; };
+    if (otherInfo == "")        { genResponseReturn(400, "Invalid Param", response); return 400; };
+    if (tradePrice == "")       { genResponseReturn(400, "Invalid Param", response); return 400; };
+
+    CGrpcCli* client = nullptr;
+    this->checkUserToken(doc["user_token"].GetInt64(), client);
+    if (client == nullptr) {
+        genResponseReturn(400, "Invalid user token", response);
+        return 400;
+    }
+
+
+    rc = client->makeTrade(tradeSchema, tradeProductName, 999/*deprecated*/, tradeProductStartID, tradeProductNumber, buyer, buyerAddr, buyerPhone, seller, sellerAddr, sellerPhone, logisticsInfo, otherInfo, tradePrice);
+    if (rc != 0) {
+        cout << "Make trade failed, error code: " << rc << endl;
+        cout << "Error message: " << client->msg << endl;
+        genResponseReturn(400, client->msg, response);
+        // return rc;
+    } else {
+        genResponseReturn(200, client->msg, response);
+    }
+    
     return 0;
 }

@@ -29,7 +29,7 @@ public:
         auto& allocator = doc.GetAllocator();
 
         // 添加 model
-        doc.AddMember("model", "deepseek-chat", allocator);
+        doc.AddMember("model", "deepseek-reasoner", allocator);
         
         // 添加 messages
         rapidjson::Value messages(rapidjson::kArrayType);
@@ -40,8 +40,8 @@ public:
         doc.AddMember("messages", messages, allocator);
 
         // 可选参数
-        doc.AddMember("temperature", 0.7, allocator);
-        doc.AddMember("max_tokens", 2048, allocator);
+        doc.AddMember("temperature", 1.0, allocator);
+        doc.AddMember("max_tokens", 8192, allocator);
         doc.AddMember("stream", false, allocator);
 
         // 序列化为字符串
@@ -99,3 +99,7 @@ public:
 private:
     std::string apiKey_;
 };
+
+
+
+
