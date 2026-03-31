@@ -312,3 +312,59 @@ parameter                 | type
 ------------------------- | ----------------------------------
 code                      | Number
 message                   | String
+
+
+# 描述
+```
+列出溯源组基础信息
+```
+# URL
+```
+/api/list_pro_basic
+```
+# METHOD
+```
+POST
+```
+# Request
+parameter                 | type                              
+------------------------- | ----------------------------------
+user_token                | Number                            
+schema                    | String                           
+name                      | String                            
+# Response
+parameter                 | type
+------------------------- | ----------------------------------
+code                      | Number
+message                   | String
+pro_basic_list            | Array of [{ "key" : "value" }]
+pro_ingredient_list       | Array of [{ "name":"", "quantity":"", "trace_code_prefix":"" }]
+# example response
+```
+{
+  "code":200,
+  "message":"",
+  "basic_info":[ {
+      "key":"brand",
+      "value":"北京烤肉股份有限公司"
+    }, {
+      "key":"type",
+      "value":"sause"
+    }, {
+      "key":"validDate",
+      "value":"2031-05-01"
+    }], 
+    "ingredient_info":[ {
+        "key":"白糖",
+        "value":"00000000000000001305000000000000",
+        "percentage":"75.00"
+      },{
+        "key":"食用油",
+        "value":"00000000000000004f04000000000000",
+        "percentage":"10.00"
+      },{
+        "key":"食盐",
+        "value":"0000000000000000c404000000000000",
+        "percentage":"15.00"
+      }]}
+```
