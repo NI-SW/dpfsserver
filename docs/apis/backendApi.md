@@ -167,7 +167,8 @@ ai_risk_report            | String
 ```
 # example response
 ```
-{"code":200,"message":"","trace_result":"Base Info: {
+{"code":200,"message":"","trace_result":"
+Base Info: {
 cstate/校验状态: 1
 ctime/上一次校验时间: 2026-03-30 10:51:34
 uid/产品编号: 15
@@ -276,3 +277,38 @@ json {
   ]
 }
 ```
+
+# 描述
+```
+执行交易操作
+```
+# URL
+```
+/api/make_trade
+```
+# METHOD
+```
+POST
+```
+# Request
+parameter                 | type                              | describe
+------------------------- | ----------------------------------| ----------------------------------
+user_token                | Number                            |
+trade_schema              | String                            | 发生交易的溯源组
+trade_product_name        | String                            | 发生交易的产品名称
+trade_product_start_id    | Number                            | 发生交易的产品起始ID
+trade_product_number      | Number                            | 发生交易的产品数量
+buyer                     | String                            | 买方名称
+buyer_addr                | String                            | 买方地址
+buyer_phone               | String                            | 买方联系方式
+seller                    | String                            | 卖方名称
+seller_addr               | String                            | 卖方地址
+seller_phone              | String                            | 卖方联系方式
+logistics_info            | String                            | 物流信息
+other_info                | String                            | 其它信息（备注）
+trade_price               | String                            | 发生金额
+# Response
+parameter                 | type
+------------------------- | ----------------------------------
+code                      | Number
+message                   | String
