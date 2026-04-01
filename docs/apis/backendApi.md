@@ -252,11 +252,12 @@ user_token                | Number                            |
 begin                     | Number                            | 提取表的起始ID
 limit                     | Number                            | 提取表的数量
 # Response
-parameter                 | type
-------------------------- | ----------------------------------
-code                      | Number
-message                   | String
-table_list                | Array of Objects
+parameter                 | type                              | describe
+------------------------- | ----------------------------------| ----------------------------------
+code                      | Number                            | 
+message                   | String                            |
+total                     | Number                            | 系统表的总数量(全部的数量，不是本次提取的数量)
+table_list                | Array of Objects                  | 系统表列表
 # Array of table_list params
 parameter                 | type                              | describe
 ------------------------- | ----------------------------------| ----------------------------------
@@ -367,4 +368,87 @@ pro_ingredient_list       | Array of [{ "name":"", "quantity":"", "trace_code_pr
         "value":"0000000000000000c404000000000000",
         "percentage":"15.00"
       }]}
+```
+
+# 描述
+```
+列出具有高安全风险或健康风险的商品信息
+```
+# URL
+```
+/api/list_risk_pro
+```
+# METHOD
+```
+POST
+```
+# Request
+parameter                 | type                              | describe
+------------------------- | ----------------------------------| ----------------------------------
+user_token                | Number                            |
+begin                     | Number                            | 提取表的起始ID
+limit                     | Number                            | 提取表的数量
+# Response
+parameter                 | type                              | describe
+------------------------- | ----------------------------------| ----------------------------------
+code                      | Number                            |
+message                   | String                            |     
+total                     | Number                            | 总风险商品数量(全部的数量，不是本次提取的数量)
+pro_list                  | Array of Objects                  | 商品列表
+
+# Array of pro_list object params
+parameter                 | type                              | describe
+------------------------- | ----------------------------------| ----------------------------------
+schema                    | String                            |
+product_name              | String                            |
+risk_description          | String                            | json格式的详细情况
+# example request
+```
+{
+  "user_token": 0,
+  "begin": 0,
+  "limit": 10
+}
+```
+# example response
+```
+{
+  "total":3,
+  "pro_list":[
+    {
+      "schema":"OOO",
+      "product_name":
+      "六个核桃",
+      "risk_description":"{
+        \"risk\": \"h\",
+        \"health\": \"h\",
+        \"comp_ana\": \"亚硝酸盐占比30%极不合理，远超食品添加剂安全限量（通常应低于0.1%），原料来源追溯记录缺失；水、糖占比正常但追溯记录同样缺失，无法验证原料安全性。\",
+        \"pot_risk\": \"亚硝酸盐过量可致急性中毒（如高铁血红蛋白血症）及长期致癌风险；成分追溯缺失可能导致污染物（如重金属、微生物）引入，整体合规性风险高。\",
+        \"suggest\": \"立即修订配方，将亚硝酸盐含量降至国家法规限值内；建立全成分追溯系统，记录原料检验报告；委托第三方检测机构进行安全评估，确保产品合规。\"
+      }"
+    }, {
+      "schema":"OOO",
+      "product_name":"7个核桃",
+      "risk_description":"{
+        \"risk\": \"h\",
+        \"health\": \"h\",
+        \"comp_ana\": \"亚硝酸盐占比30.00%极高，远超食品添加剂安全标准（通常<0.05%），原料来源及追溯记录缺失；水、白糖占比合理但追溯记录为空，无法验证安全性。\",
+        \"pot_risk\": \"亚硝酸盐过量可致急性中毒（如高铁血红蛋白症）和致癌风险；成分追溯缺失可能引入污染物或掺假；配方异常增加误用风险。\",
+        \"suggest\": \"立即调整配方，将亚硝酸盐含量降至法规限值内；建立完整供应链追溯系统；进行安全检测以确保合规；重新评估产品用途并加强标签警示。\"
+      }"
+    }, {
+      "schema":"OOO",
+      "product_name":"9个核桃",
+      "risk_description":"{
+        \"risk\": \"h\",
+        \"health\": \"h\",
+        \"comp_ana\": \"亚硝酸盐占比30%过高（食品添加剂通常以ppm计），来源与校验记录缺失；水记录缺失；白糖溯源异常（子成分百分比0.00、名称none），记录不完整。\",
+        \"pot_risk\": \"亚硝酸盐过量可致急性中毒（如高铁血红蛋白血症）或长期致癌风险；白糖可能掺假或污染；成分数据矛盾暗示配方错误。\",
+        \"suggest\": \"立即调整配方，将亚硝酸盐降至法规安全限值（如＜0.01%）；完善所有成分溯源及校验记录；进行实验室检测验证含量；审核数据录入流程。\"
+      }"
+    }
+  ],
+  "code":200,
+  "message":""
+}
 ```
