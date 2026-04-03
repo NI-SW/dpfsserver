@@ -131,6 +131,22 @@ int main(int argc, char* argv[]) {
             auto res = crow::response(200, msg);
             return res;
         });
+
+#define __LIST_RISK_PRO_API__
+    CROW_ROUTE(app, "/api/list_risk_pro")
+        .methods("POST"_method)([](const crow::request& req) {
+            // get json string
+            int rc = 0;
+            std::cout << "Received JSON: " << req.body << std::endl;
+            std::string msg = "";
+            rc = sys.listRiskPro(req.body, msg);
+            if (rc != 0) {
+                return crow::response(rc, msg);
+            }
+            auto res = crow::response(200, msg);
+            return res;
+        });
+
         
     app.port(20510).multithreaded().run();
 

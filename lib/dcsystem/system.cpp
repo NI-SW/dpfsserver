@@ -524,6 +524,9 @@ int CSystem::risk(const std::string& request, std::string& response) {
     rc = checkJsonFormat(doc, "base_info", jsonFieldType::IsArray, response); if (rc != 0) { return rc; }
     rc = checkJsonFormat(doc, "risk_report", jsonFieldType::IsInt, response); if (rc != 0) { return rc; }
 
+    std::string schema = doc["schema"].GetString();
+    std::string product_name = doc["product_name"].GetString();
+
     CGrpcCli* client = nullptr;
     this->checkUserToken(doc["user_token"].GetInt64(), client);
     if (client == nullptr) {
@@ -559,8 +562,8 @@ int CSystem::risk(const std::string& request, std::string& response) {
     size_t product_number = doc["product_number"].GetInt64();
     std::string trace_code_prefix;
     rc = client->createTracablePro(
-        doc["schema"].GetString(),
-        doc["product_name"].GetString(),
+        schema,
+        product_name,
         base_info,
         ingredients,
         product_number,
@@ -597,10 +600,30 @@ int CSystem::risk(const std::string& request, std::string& response) {
         std::string risk_info;
         rc = this->generateRiskReport(result, risk_info, *client);
         if (rc != 0) {
-            genResponseReturn(rc, client->msg, response);
+            genResponseReturn(400, client->msg, response);
             return rc;
         }
 
+        // judge risk level, if high, add the info to the risk table.
+        rapidjson::Document docRiskInfo;
+        docRiskInfo.SetObject();
+        docRiskInfo.Parse(risk_info.c_str());
+        if (docRiskInfo.HasParseError()) {
+            genResponseReturn(400, std::string(rapidjson::GetParseError_En(docRiskInfo.GetParseError())), response);
+            return 400;
+        }
+        std::string risk = docRiskInfo["risk"].GetString();
+        std::string health = docRiskInfo["health"].GetString();
+        if (memcmp(risk.c_str(), "h", 1) == 0 || memcmp(health.c_str(), "h", 1) == 0) {
+            std::string sql = "INSERT INTO SYSDPFS.SYSRISKWARNS VALUES ('" + schema + "', '" + product_name + "', '" + risk_info + "', 0)";
+            cout << " insert sql : " << sql << endl;
+            rc = client->execSQL(sql);
+            if (rc != 0) {
+                genResponseReturn(400, client->msg, response);
+                return rc;
+            }
+        }
+        
 
 
         rapidjson::Document docRet;
@@ -1297,5 +1320,216 @@ int CSystem::makeTrade(const std::string& request, std::string& response) {
         genResponseReturn(200, client->msg, response);
     }
     
+    return 0;
+}
+
+int CSystem::listRiskPro(const std::string& request, std::string& response) {
+
+
+    // return message struct
+    std::string group_name;      // 组名
+    std::string product_name;    // 产品名
+    std::string risk_info; // 风险信息
+
+
+    int rc = 0;
+    rapidjson::Document doc;
+    doc.Parse(request.c_str());
+
+    if (doc.HasParseError()) {
+        genResponseReturn(400, std::string(rapidjson::GetParseError_En(doc.GetParseError())), response);
+        return 400;
+    }
+
+    if (!doc.IsObject()) {
+        genResponseReturn(400, "Root must be a JSON object", response);
+        return 400;
+    }
+
+    if (!doc.IsObject()) {
+        genResponseReturn(400, "Root must be a JSON object", response);
+        return 400;
+    }
+    
+    rc = checkJsonFormat(doc, "user_token", jsonFieldType::IsInt64, response); if (rc != 0) { return rc; }
+
+    int64_t user_token = doc["user_token"].GetInt64();
+    CGrpcCli* client = nullptr;
+    rc = checkUserToken(user_token, client);
+    if (rc != 0) {
+        genResponseReturn(400, "Invalid user token", response);
+        return 400;
+    }
+    if (client == nullptr) {
+        genResponseReturn(400, "User token not found", response);
+        return 400;
+    }
+
+    /*
+    # Request
+parameter                 | type                               | describe  
+------------------------- | ---------------------------------- | 
+user_token                | Number                             | 
+begin                     | Number                             | 提取的起始位置
+limit                     | Number                             | 提取的数量
+# Response
+parameter                 | type                               | describe
+------------------------- | ---------------------------------- | ----------------------------------              
+code                      | Number                             | 
+message                   | String                             | 
+total                     | Number                             | 溯源结构总数(全部的数量，不是本次提取的数量)
+trace_pros                | Array of Objects                   | 溯源结构列表
+    */
+
+    rc = checkJsonFormat(doc, "begin", jsonFieldType::IsInt64, response); if (rc != 0) { return rc; }
+    rc = checkJsonFormat(doc, "limit", jsonFieldType::IsInt64, response); if (rc != 0) { return rc; }
+
+    int64_t begin = doc["begin"].GetInt64();
+    int64_t limit = doc["limit"].GetInt64();
+
+    // get table handle
+    rc = client->getTableHandle("SYSDPFS", "SYSRISKWARNS"); 
+    if (rc != 0) {
+        genResponseReturn(rc, client->msg, response);
+        return rc;
+    }
+
+    std::vector<std::string> idxCol;
+    idxCol.emplace_back();
+    idxCol[0].resize(8);
+    memcpy(const_cast<char*>(idxCol[0].data()), &begin, sizeof(begin));
+    IDXHANDLE hidx = 0;
+
+    rc = client->getIdxIter({"RTID"}, idxCol, hidx);
+    if (rc != 0) {
+        if (rc == ENOENT) {
+            // no more row to fetch, return empty result
+            genResponseReturn(0, "No more traceable products", response);
+            return 0;
+        }
+        genResponseReturn(rc, client->msg, response);
+        return rc;
+    }
+
+    const auto& colInfo = client->getColInfo(hidx);
+    size_t total = client->getTotalRowCount(hidx);
+    // cout << "Total traceable products: " << total << endl;
+
+    rc = client->fetchNextRow(hidx);
+    if (rc != 0) {
+        if (rc == ENOENT) {
+            // no more row to fetch, return empty result
+            genResponseReturn(0, "No more traceable products", response);
+            return 0;
+        }
+        genResponseReturn(rc, client->msg, response);
+        return rc;
+    }
+
+    rapidjson::Document docRet;
+    docRet.SetObject();
+    auto& allocator = docRet.GetAllocator();
+
+/*
+    "ROOT",      dpfs_datatype_t::TYPE_BINARY,    16,
+    "NAME",      dpfs_datatype_t::TYPE_CHAR,      64,
+    "SCHEMA",    dpfs_datatype_t::TYPE_CHAR,      64,
+*/
+    // cout << "Total traceable products: " << total << endl;
+    rapidjson::Document traceProArr;
+    traceProArr.SetArray();
+/*
+    rc = sysriskwarns.addCol("SCHEMA",      dpfs_datatype_t::TYPE_CHAR,      64,   0, cf::NOT_NULL | cf::PRIMARY_KEY);              if (rc != 0) { goto errReturn; }
+    rc = sysriskwarns.addCol("NAME",        dpfs_datatype_t::TYPE_CHAR,      64,   0, cf::NOT_NULL | cf::PRIMARY_KEY);              if (rc != 0) { goto errReturn; }
+    rc = sysriskwarns.addCol("DESCRIPTION", dpfs_datatype_t::TYPE_CHAR,      2048, 0, cf::NOT_NULL);                                if (rc != 0) { goto errReturn; }
+    rc = sysriskwarns.addCol("RTID",        dpfs_datatype_t::TYPE_BIGINT,    8,    0, cf::NOT_NULL | cf::UNIQUE |cf::AUTO_INC);     if (rc != 0) { goto errReturn; }
+*/
+    for (int i = 0; i < limit; ++i) {
+        if (rc != 0) {
+            break;
+        }
+        rapidjson::Document traceProObj;
+        traceProObj.SetObject();
+
+        std::string gval;
+        rc = client->getDataByIdxIter(hidx, 0, gval);
+        if (rc != 0) {
+            genResponseReturn(rc, client->msg, response);
+            return rc;
+        }
+        
+        // convert gval from binary to hex string
+        std::string schema(gval);
+
+        rc = client->getDataByIdxIter(hidx, 1, gval);
+        if (rc != 0) {
+            genResponseReturn(rc, client->msg, response);
+            return rc;
+        }
+        std::string product_name(gval);
+
+        rc = client->getDataByIdxIter(hidx, 2, gval);
+        if (rc != 0) {
+            genResponseReturn(rc, client->msg, response);
+            return rc;
+        }
+        std::string describe(gval);
+
+        /*
+        {
+            code: 0 ,
+            message : "",
+            total: 128,
+            trace_pros : [
+                {"schema":"OOO", "product_name":"苹果派", "risk_description":"风险描述1"},
+                {"schema":"OOO", "product_name":"香蕉派", "risk_description":"风险描述2"},
+                {"schema":"OOO", "product_name":"草莓派", "risk_description":"风险描述3"}
+            ]
+        }
+        */
+
+        traceProObj.AddMember("schema", rapidjson::Value(schema.c_str(), allocator), allocator);
+        traceProObj.AddMember("product_name", rapidjson::Value(product_name.c_str(), allocator), allocator);
+        traceProObj.AddMember("risk_description", rapidjson::Value(describe.c_str(), allocator), allocator);
+        
+        traceProArr.PushBack(traceProObj, allocator);
+
+        rc = client->fetchNextRow(hidx);
+        if (rc != 0) {
+            break;
+        }
+    }
+
+    docRet.AddMember("total", total, allocator);
+    docRet.AddMember("pro_list", traceProArr, allocator);
+
+    // cout << "Release table handle" << endl;
+    rc = client->releaseIdxIter(hidx);
+    if (rc != 0) {
+        // genResponseReturn(rc, client->msg, response);
+        // return rc;
+    }
+
+    // cout << "Release index iterator" << endl;
+    rc = client->releaseTableHandle();
+    if (rc != 0) {
+        genResponseReturn(rc, client->msg, response);
+        return rc;
+    }
+
+
+
+    docRet.AddMember("code", 200, allocator);
+    docRet.AddMember("message", "", allocator);
+
+    /*
+{"user_token": 0, "begin": 0, "limit": 10}
+    */
+    
+    rapidjson::StringBuffer buffer;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+    docRet.Accept(writer);
+    response = buffer.GetString();
+
     return 0;
 }

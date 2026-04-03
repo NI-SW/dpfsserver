@@ -46,6 +46,8 @@ public:
     */
     int listProBasic(const std::string& request, std::string& response);
     int makeTrade(const std::string& request, std::string& response);
+
+    int listRiskPro(const std::string& request, std::string& response);
 private:
 
     // <user_token, dpfsclient>

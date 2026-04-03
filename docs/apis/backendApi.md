@@ -417,8 +417,7 @@ risk_description          | String                            | json格式的详
   "pro_list":[
     {
       "schema":"OOO",
-      "product_name":
-      "六个核桃",
+      "product_name":"六个核桃",
       "risk_description":"{
         \"risk\": \"h\",
         \"health\": \"h\",
