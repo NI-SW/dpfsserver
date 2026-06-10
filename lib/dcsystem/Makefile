@@ -9,7 +9,7 @@ include $(DPFS_ROOT_DIR)/mk/dpfs.common.mk
 
 
 CXXFLAG += -g
-CXXHEADER += -I$(DPFS_ROOT_DIR)/thirdparty/dpfsclient/include
-CXXLIB += -L$(DPFS_ROOT_DIR)/thirdparty/dpfsclient/lib
+CXXHEADER += -I$(DPFS_ROOT_DIR)/thirdparty/dpfs/include
+CXXLIB += -L$(DPFS_ROOT_DIR)/thirdparty/dpfs/lib -lodbc
 LIB := $(DPFS_ROOT_DIR)/lib/libdcsys.so
 include $(DPFS_ROOT_DIR)/mk/dpfs.lib.mk

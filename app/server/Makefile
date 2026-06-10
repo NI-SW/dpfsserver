@@ -3,8 +3,8 @@ DPFS_ROOT_DIR := $(abspath $(CURDIR)/../..)
 
 include $(DPFS_ROOT_DIR)/mk/dpfs.common.mk
 
-CXXHEADER += -I$(DPFS_ROOT_DIR)/thirdparty/dpfsclient/include -I$(DPFS_ROOT_DIR)/thirdparty/Crow/include
-CXXLIB += -L$(DPFS_ROOT_DIR)/thirdparty/dpfsclient/lib
+CXXHEADER += -I$(DPFS_ROOT_DIR)/thirdparty/dpfs/include -I$(DPFS_ROOT_DIR)/thirdparty/Crow/include
+CXXLIB += -L$(DPFS_ROOT_DIR)/thirdparty/dpfs/lib
 CXXFLAG += -g
 CXXLIB += -ldpfs_log -ldpfs_net -ldpfs_tcp -ldpfs_basic -lmydecimal -ldpfs_collect -ldpfs_client -lgrpc++ -lprotobuf -ldpfs_proto -ldpfs_grpc -lcurl -ldcsys
 

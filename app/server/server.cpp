@@ -20,6 +20,11 @@ int main(int argc, char* argv[]) {
     initInfo.systemVersion = "0.0.0.1";
     initInfo.apiKey = "";
     initInfo.connStr = "127.0.0.1:20500";
+    initInfo.mysqlHost     = "127.0.0.1";
+    initInfo.mysqlPort     = 3306;
+    initInfo.mysqlUser     = "root";
+    initInfo.mysqlPasswd   = "";
+    initInfo.mysqlDatabase = "dpfs";
 
     Analy_Input(argc, argv);
 
@@ -156,8 +161,13 @@ int main(int argc, char* argv[]) {
 void Args_Error()
 {
     cout << "\tThe args begin with:\n" <<
-        "\t--ak         [ai api key]\n" <<
-        "\t--connStr    [dpfs server connection string]\n" << endl;
+        "\t--ak              [ai api key]\n" <<
+        "\t--connStr         [dpfs server connection string]\n" <<
+        "\t--mysqlHost       [MySQL host, default 127.0.0.1]\n" <<
+        "\t--mysqlPort       [MySQL port, default 3306]\n" <<
+        "\t--mysqlUser       [MySQL user, default root]\n" <<
+        "\t--mysqlPasswd     [MySQL password]\n" <<
+        "\t--mysqlDatabase   [MySQL database, default dpfs]\n" << endl;
 
 }
 
@@ -189,6 +199,21 @@ void Analy_Input(int argc, char** argv) {
             i += 2;
         } else if (Input[i] == "--connStr") {
             initInfo.connStr = Input[i + 1];
+            i += 2;
+        } else if (Input[i] == "--mysqlHost") {
+            initInfo.mysqlHost = Input[i + 1];
+            i += 2;
+        } else if (Input[i] == "--mysqlPort") {
+            initInfo.mysqlPort = std::stoi(Input[i + 1]);
+            i += 2;
+        } else if (Input[i] == "--mysqlUser") {
+            initInfo.mysqlUser = Input[i + 1];
+            i += 2;
+        } else if (Input[i] == "--mysqlPasswd") {
+            initInfo.mysqlPasswd = Input[i + 1];
+            i += 2;
+        } else if (Input[i] == "--mysqlDatabase") {
+            initInfo.mysqlDatabase = Input[i + 1];
             i += 2;
         } else {
             cout << "missing args,exit" << endl;
