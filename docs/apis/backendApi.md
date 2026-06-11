@@ -17,11 +17,30 @@ parameter                 | type
 username                  | String
 password                  | String
 # Response
-parameter                 | type
+parameter                 | type                              | describe
+------------------------- | ----------------------------------| ----------------------------------
+code                      | Number                            | 状态码，0表示成功
+message                   | String                            | 状态信息
+user_token                | Number                            | 登录令牌，后续API调用需携带
+role                      | String                            | 用户角色（admin / supervisor / manufacturer / consumer）
+
+# 角色权限对照表
+角色                      | 权限码
 ------------------------- | ----------------------------------
-code                      | Number
-message                   | String
-user_token                | Number
+admin                     | *（全部权限）
+supervisor                | product:list, product:trace, product:risk:view, system:audit:view
+manufacturer              | product:list, product:trace, product:risk:create, trade:create
+consumer                  | product:trace
+
+# 页面权限对照表
+页面                      | 所需权限码                        | admin | supervisor | manufacturer | consumer
+------------------------- | ----------------------------------| ----- | ---------- | ------------ | --------
+信息录入(dashboard)       | product:risk:create               | Y     | N          | Y            | N
+商品溯源(trace)           | product:trace                     | Y     | Y          | Y            | Y
+创建交易(make_trade)      | trade:create                      | Y     | N          | Y            | N
+数据查询(activity)        | product:list                      | Y     | Y          | Y            | N
+风险查询(risk_query)      | product:risk:view                 | Y     | Y          | N            | N
+个人中心(profile)         | （无需权限）                       | Y     | Y          | Y            | Y
 
 
 # URL
@@ -149,12 +168,26 @@ trace_detail              | Number                            | 0 or 1, 是否�
 ingre_detail              | Number                            | 0 or 1, 是否返回详细配料信息
 ai_risk                   | Number                            | 0 or 1, 是否返回AI风险评估信息
 # Response
-parameter                 | type
-------------------------- | ----------------------------------
-code                      | Number
-message                   | String
-trace_result              | String
-ai_risk_report            | String
+parameter                 | type                              | describe
+------------------------- | ----------------------------------| ----------------------------------
+code                      | Number                            | 状态码，200表示成功
+message                   | String                            | 状态信息
+trace_result              | String                            | JSON字符串（兼容旧版），包含产品基本信息、交易信息、配料树
+trace_result_json         | Object                            | 结构化JSON对象，内容与trace_result相同但为原生JSON格式，推荐使用
+ai_risk_report            | String                            | AI风险评估报告（ai_risk=1时返回）
+meta_ingredient_table     | Array of Objects                  | 元配料整合表，所有叶子配料相对根产品的累计占比
+# trace_result_json 结构说明
+字段                      | type                              | describe
+------------------------- | ----------------------------------| ----------------------------------
+(基础信息字段)            | String                            | 产品类型、生产日期、品牌、净含量等（键名由录入时base_info决定）
+trade_info                | Array of Objects                  | 交易信息列表，每个对象包含一笔交易的所有字段
+ingredient_info           | Array of Objects                  | 配料信息列表，每个对象包含 Ingredient Name、Ingredient Percentage，可选 IngredientInfo（递归子配料）
+# meta_ingredient_table object params
+parameter                 | type                              | describe
+------------------------- | ----------------------------------| ----------------------------------
+name                      | String                            | 元配料名称
+percentage                | String                            | 相对根产品的累计占比（如"25.00%"）
+grams                     | String                            | 相对根产品的累计克数（如"300.00"）
 # example request
 ```
 {
@@ -228,8 +261,7 @@ Ingredient Base Info:
 1. **橄榄油氧化风险**：过氧化值数据需核对其是否符合≤10mmol/kg的国标要求，若接近上限可能存在油脂酸败隐患。  
 2. **纯净水溯源缺失**：未提供具体水源检测报告，存在微生物或污染物潜在风险。  
 3. **生产时间差**：橄榄油生产日期（2026-03-01）晚于酱料生产日期（2026-01-01），逻辑矛盾，可能影响原料新鲜度评估。  
-4. **链接报告时效性**：部分检测报告链接时间较早（如2019年），可能不反映当前批次质量。"
-}
+4. **链接报告时效性**：部分检测报告链接时间较早（如2019年），可能不反映当前批次质量。","meta_ingredient_table":[{"name":"单不饱和脂肪酸","percentage":"5.18%","grams":"62.16"},{"name":"纯净水","percentage":"90.00%","grams":"1080.00"},{"name":"氯化钠","percentage":"3.00%","grams":"36.00"}]}
 ```
 
 
@@ -449,5 +481,149 @@ risk_description          | String                            | json格式的详
   ],
   "code":200,
   "message":""
+}
+```
+
+# 描述
+```
+查询当前登录用户的账户信息
+```
+# URL
+```
+/api/user_info
+```
+# METHOD
+```
+POST
+```
+# Request
+parameter                 | type                              | describe
+-------------------------|-----------------------------------|----------------------------------
+user_token                | Number                            | 登录后获取的令牌
+# Response
+parameter                 | type                              | describe
+-------------------------|-----------------------------------|----------------------------------
+code                      | Number                            | 状态码，200表示成功
+message                   | String                            | 状态信息
+uid                       | Number                            | 用户ID
+username                  | String                            | 用户名
+role                      | String                            | 角色（admin / consumer 等）
+status                    | String                            | 账户状态（active / disabled / locked）
+last_login                | String                            | 上次登录时间
+created_at                | String                            | 账户创建时间
+real_name                 | String                            | 真实姓名
+phone                     | String                            | 手机号
+mail                      | String                            | 邮箱
+description               | String                            | 个人描述
+# example request
+```
+{
+  "user_token": 1
+}
+```
+# example response
+```
+{
+  "code": 200,
+  "message": "success",
+  "uid": 1,
+  "username": "root",
+  "role": "admin",
+  "status": "active",
+  "last_login": "2026-06-10 14:22:25",
+  "created_at": "2026-06-09 01:43:07",
+  "real_name": "系统超管",
+  "phone": "13800138000",
+  "mail": "root@dpfs.internal",
+  "description": "超级管理员"
+}
+```
+
+# 描述
+```
+修改当前登录用户的登录密码
+```
+# URL
+```
+/api/update_password
+```
+# METHOD
+```
+POST
+```
+# Request
+parameter                 | type                              | describe
+-------------------------|-----------------------------------|----------------------------------
+user_token                | Number                            | 登录后获取的令牌
+old_password              | String                            | 当前密码
+new_password              | String                            | 新密码（至少4位）
+# Response
+parameter                 | type                              | describe
+-------------------------|-----------------------------------|----------------------------------
+code                      | Number                            | 状态码，200表示成功，403表示旧密码错误
+message                   | String                            | 状态信息
+# example request
+```
+{
+  "user_token": 1,
+  "old_password": "Zfo$123@",
+  "new_password": "NewPass123"
+}
+```
+# example response (成功)
+```
+{
+  "code": 200,
+  "message": "Password updated successfully"
+}
+```
+# example response (旧密码错误)
+```
+{
+  "code": 403,
+  "message": "Old password is incorrect"
+}
+```
+
+# 描述
+```
+修改当前登录用户的基础信息（姓名、手机号、邮箱、个人描述）
+```
+# URL
+```
+/api/update_user_info
+```
+# METHOD
+```
+POST
+```
+# Request
+parameter                 | type                              | describe
+-------------------------|-----------------------------------|----------------------------------
+user_token                | Number                            | 登录后获取的令牌
+real_name                 | String                            | 真实姓名（可选，不传则置空）
+phone                     | String                            | 手机号（可选，不传则置空）
+mail                      | String                            | 邮箱（可选，不传则置空）
+description               | String                            | 个人描述（可选，不传则置空）
+# Response
+parameter                 | type                              | describe
+-------------------------|-----------------------------------|----------------------------------
+code                      | Number                            | 状态码，200表示成功
+message                   | String                            | 状态信息
+# example request
+```
+{
+  "user_token": 1,
+  "real_name": "张三",
+  "phone": "13900139000",
+  "mail": "zhangsan@example.com",
+  "description": "食品安全检验员"
+}
+```
+# example response
+```
+{
+  "code": 200,
+  "message": "User info updated successfully"
 }
 ```

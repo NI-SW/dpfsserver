@@ -152,6 +152,48 @@ int main(int argc, char* argv[]) {
             return res;
         });
 
+#define __USER_INFO_API__
+    CROW_ROUTE(app, "/api/user_info")
+        .methods("POST"_method)([](const crow::request& req) {
+            int rc = 0;
+            std::cout << "Received JSON: " << req.body << std::endl;
+            std::string msg = "";
+            rc = sys.getUserInfo(req.body, msg);
+            if (rc != 0) {
+                return crow::response(rc, msg);
+            }
+            auto res = crow::response(200, msg);
+            return res;
+        });
+
+#define __UPDATE_PASSWORD_API__
+    CROW_ROUTE(app, "/api/update_password")
+        .methods("POST"_method)([](const crow::request& req) {
+            int rc = 0;
+            std::cout << "Received JSON: " << req.body << std::endl;
+            std::string msg = "";
+            rc = sys.updatePassword(req.body, msg);
+            if (rc != 0) {
+                return crow::response(rc, msg);
+            }
+            auto res = crow::response(200, msg);
+            return res;
+        });
+
+#define __UPDATE_USER_INFO_API__
+    CROW_ROUTE(app, "/api/update_user_info")
+        .methods("POST"_method)([](const crow::request& req) {
+            int rc = 0;
+            std::cout << "Received JSON: " << req.body << std::endl;
+            std::string msg = "";
+            rc = sys.updateUserInfo(req.body, msg);
+            if (rc != 0) {
+                return crow::response(rc, msg);
+            }
+            auto res = crow::response(200, msg);
+            return res;
+        });
+
         
     app.port(20510).multithreaded().run();
 

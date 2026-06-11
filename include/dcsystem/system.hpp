@@ -74,6 +74,12 @@ public:
     int makeTrade(const std::string& request, std::string& response);
 
     int listRiskPro(const std::string& request, std::string& response);
+
+    // 用户信息查询 & 修改密码 & 修改信息
+    int getUserInfo(const std::string& request, std::string& response);
+    int updatePassword(const std::string& request, std::string& response);
+    int updateUserInfo(const std::string& request, std::string& response);
+
 private:
 
     // <user_token, UserSession>

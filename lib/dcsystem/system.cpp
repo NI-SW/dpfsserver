@@ -480,7 +480,7 @@ int CSystem::logout(const std::string& request, std::string& response) {
     CGrpcCli& client = *it->second->client;
     rc = client.logoff();
     if (rc == 0) {
-        genResponseReturn(0, "Logoff successful", response);
+        genResponseReturn(200, "Logoff successful", response);
         // 审计日志
         writeAuditLog(uid, username, role, "logout", "/api/logout", "", "success");
         user_tokens.erase(it);
@@ -934,6 +934,27 @@ int CSystem::recursiveTrace(const std::string& trace_code, CGrpcCli& client, std
             }
             
             ingredientInfoStr += indent + key + ": " + value + "\n";
+        }
+
+        // 检测 ingredientName 是否包含乱码（非可打印字符）
+        bool hasGarbageName = false;
+        for (unsigned char c : ingredientName) {
+            if (c < 0x20 && c != '\t' && c != '\n' && c != '\r') {
+                hasGarbageName = true;
+                break;
+            }
+        }
+        // 过滤乱码配料：Percentage<=0 或 Name 含非可打印字符 → 跳过，不加入 JSON
+        if (hasGarbageName || ingredientPercentage <= 0) {
+            result += ingredientInfoStr;
+            continue;
+        }
+
+        // 正常配料：将字段加入 JSON
+        for (const auto& [key, value] : ingredient.ingredient_info) {
+            if (memcmp(key.c_str(), "Ingredient Trace Code", 21) == 0) {
+                continue;
+            }
             if (tDoc && parentDoc) {
                 ingredientDoc.AddMember(
                     rapidjson::Value(key.c_str(), static_cast<rapidjson::Document*>(parentDoc)->GetAllocator()), 
@@ -943,8 +964,6 @@ int CSystem::recursiveTrace(const std::string& trace_code, CGrpcCli& client, std
         }
 
         result += ingredientInfoStr;
-
-        // calculate this ingredient's proportion relative to root
         double currentProportion = parentProportion * (ingredientPercentage / 100.0);
 
         // 判断溯源码是否全零（全零视为无效/无溯源码，即叶子配料）
@@ -1218,6 +1237,26 @@ int CSystem::traceBack(const std::string& request, std::string& response) {
                 }
             }
             ingredientInfoStr += key + ": " + value + "\n";
+        }
+
+        // 检测 firstLevelIngName 是否包含乱码（非可打印字符）
+        bool hasGarbageName = false;
+        for (unsigned char c : firstLevelIngName) {
+            if (c < 0x20 && c != '\t' && c != '\n' && c != '\r') {
+                hasGarbageName = true;
+                break;
+            }
+        }
+        // 过滤乱码配料：Percentage<=0 或 Name 含非可打印字符 → 跳过，不加入 JSON
+        if (hasGarbageName || firstLevelIngPct <= 0) {
+            continue;
+        }
+
+        // 正常配料：将字段加入 JSON
+        for (const auto& [key, value] : ingredient.ingredient_info) {
+            if (memcmp(key.c_str(), "Ingredient Trace Code", 21) == 0) {
+                continue;
+            }
             ingredientDoc.AddMember(
                 rapidjson::Value(key.c_str(), tDoc.GetAllocator()),
                 rapidjson::Value(value.c_str(), tDoc.GetAllocator()),
@@ -1357,6 +1396,7 @@ int CSystem::traceBack(const std::string& request, std::string& response) {
     retDoc.AddMember("code", 200, allocator);
     retDoc.AddMember("message", "", allocator);
     retDoc.AddMember("trace_result", rapidjson::Value(tDocStr.c_str(), allocator), allocator);
+    retDoc.AddMember("trace_result_json", tDoc, allocator);
     retDoc.AddMember("ai_risk_report", rapidjson::Value(aiRiskStr.c_str(), allocator), allocator);
     retDoc.AddMember("meta_ingredient_table", metaTableArr, allocator);
 
@@ -1815,5 +1855,356 @@ trace_pros                | Array of Objects                   | 溯源结构列
     docRet.Accept(writer);
     response = buffer.GetString();
 
+    return 0;
+}
+
+// ============================================================================
+// getUserInfo: 根据 user_token 查询当前用户信息
+// ============================================================================
+int CSystem::getUserInfo(const std::string& request, std::string& response) {
+    int rc = 0;
+    const std::string& jsonStr = request;
+
+    rapidjson::Document doc;
+    doc.Parse(jsonStr.c_str());
+    if (doc.HasParseError()) {
+        genResponseReturn(400, std::string(rapidjson::GetParseError_En(doc.GetParseError())), response);
+        return 400;
+    }
+    if (!doc.IsObject()) {
+        genResponseReturn(400, "Root must be a JSON object", response);
+        return 400;
+    }
+
+    rc = checkJsonFormat(doc, "user_token", jsonFieldType::IsInt64, response);
+    if (rc != 0) return rc;
+
+    int64_t token = doc["user_token"].GetInt64();
+
+    // 查找 session（个人中心操作仅需有效 token，不需要权限码）
+    UserSession* session = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(this->user_tokens_mutex);
+        auto it = user_tokens.find(token);
+        if (it == user_tokens.end()) {
+            genResponseReturn(401, "Invalid token", response);
+            return 401;
+        }
+        session = it->second.get();
+    }
+
+    // 从 MySQL 查询完整用户信息
+    std::string dbName, dbRole, dbStatus, dbLastLogin, dbCreatedAt;
+    std::string dbRealName, dbPhone, dbMail, dbDesc;
+    {
+        SQLHENV env = SQL_NULL_HANDLE;
+        SQLHDBC dbc = SQL_NULL_HANDLE;
+        SQLHSTMT stmt = SQL_NULL_HANDLE;
+        SQLRETURN ret;
+        char colName[256], colRole[32], colStatus[32], colLastLogin[64], colCreatedAt[64];
+        char colRealName[256], colPhone[64], colMail[128], colDesc[1024];
+        SQLLEN ind;
+
+        ret = SQLAllocHandle(SQL_HANDLE_ENV, SQL_NULL_HANDLE, &env);
+        if (ret == SQL_SUCCESS || ret == SQL_SUCCESS_WITH_INFO) {
+            SQLSetEnvAttr(env, SQL_ATTR_ODBC_VERSION, (SQLPOINTER)SQL_OV_ODBC3, 0);
+            ret = SQLAllocHandle(SQL_HANDLE_DBC, env, &dbc);
+            if (ret == SQL_SUCCESS || ret == SQL_SUCCESS_WITH_INFO) {
+                std::string connStr = buildOdbcConnStr();
+                ret = SQLDriverConnect(dbc, nullptr, (SQLCHAR*)connStr.c_str(), SQL_NTS,
+                                       nullptr, 0, nullptr, SQL_DRIVER_COMPLETE);
+                if (ret == SQL_SUCCESS || ret == SQL_SUCCESS_WITH_INFO) {
+                    ret = SQLAllocHandle(SQL_HANDLE_STMT, dbc, &stmt);
+                    if (ret == SQL_SUCCESS || ret == SQL_SUCCESS_WITH_INFO) {
+                        std::string sql = "SELECT name, role, status, COALESCE(last_login_at,''), COALESCE(created_at,''), COALESCE(real_name,''), COALESCE(phone,''), COALESCE(mail,''), COALESCE(description,'') FROM users WHERE id = " + std::to_string(session->uid);
+                        ret = SQLExecDirect(stmt, (SQLCHAR*)sql.c_str(), SQL_NTS);
+                        if (ret == SQL_SUCCESS || ret == SQL_SUCCESS_WITH_INFO) {
+                            if (SQLFetch(stmt) == SQL_SUCCESS) {
+                                SQLGetData(stmt, 1, SQL_C_CHAR, colName, sizeof(colName), &ind);
+                                SQLGetData(stmt, 2, SQL_C_CHAR, colRole, sizeof(colRole), &ind);
+                                SQLGetData(stmt, 3, SQL_C_CHAR, colStatus, sizeof(colStatus), &ind);
+                                SQLGetData(stmt, 4, SQL_C_CHAR, colLastLogin, sizeof(colLastLogin), &ind);
+                                SQLGetData(stmt, 5, SQL_C_CHAR, colCreatedAt, sizeof(colCreatedAt), &ind);
+                                SQLGetData(stmt, 6, SQL_C_CHAR, colRealName, sizeof(colRealName), &ind);
+                                SQLGetData(stmt, 7, SQL_C_CHAR, colPhone, sizeof(colPhone), &ind);
+                                SQLGetData(stmt, 8, SQL_C_CHAR, colMail, sizeof(colMail), &ind);
+                                SQLGetData(stmt, 9, SQL_C_CHAR, colDesc, sizeof(colDesc), &ind);
+                                dbName = colName;
+                                dbRole = colRole;
+                                dbStatus = colStatus;
+                                dbLastLogin = colLastLogin;
+                                dbCreatedAt = colCreatedAt;
+                                dbRealName = colRealName;
+                                dbPhone = colPhone;
+                                dbMail = colMail;
+                                dbDesc = colDesc;
+                            }
+                        }
+                        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+                    }
+                    SQLDisconnect(dbc);
+                }
+                SQLFreeHandle(SQL_HANDLE_DBC, dbc);
+            }
+            SQLFreeHandle(SQL_HANDLE_ENV, env);
+        }
+    }
+
+    // 返回用户信息
+    rapidjson::Document docRet;
+    docRet.SetObject();
+    auto& allocator = docRet.GetAllocator();
+    docRet.AddMember("code", 200, allocator);
+    docRet.AddMember("message", "success", allocator);
+    docRet.AddMember("uid", session->uid, allocator);
+    docRet.AddMember("username", rapidjson::Value(dbName.c_str(), allocator), allocator);
+    docRet.AddMember("role", rapidjson::Value(dbRole.c_str(), allocator), allocator);
+    docRet.AddMember("status", rapidjson::Value(dbStatus.c_str(), allocator), allocator);
+    docRet.AddMember("last_login", rapidjson::Value(dbLastLogin.c_str(), allocator), allocator);
+    docRet.AddMember("created_at", rapidjson::Value(dbCreatedAt.c_str(), allocator), allocator);
+    docRet.AddMember("real_name", rapidjson::Value(dbRealName.c_str(), allocator), allocator);
+    docRet.AddMember("phone", rapidjson::Value(dbPhone.c_str(), allocator), allocator);
+    docRet.AddMember("mail", rapidjson::Value(dbMail.c_str(), allocator), allocator);
+    docRet.AddMember("description", rapidjson::Value(dbDesc.c_str(), allocator), allocator);
+
+    rapidjson::StringBuffer buffer;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+    docRet.Accept(writer);
+    response = buffer.GetString();
+
+    return 0;
+}
+
+// ============================================================================
+// updatePassword: 修改当前用户密码
+// ============================================================================
+int CSystem::updatePassword(const std::string& request, std::string& response) {
+    int rc = 0;
+    const std::string& jsonStr = request;
+
+    rapidjson::Document doc;
+    doc.Parse(jsonStr.c_str());
+    if (doc.HasParseError()) {
+        genResponseReturn(400, std::string(rapidjson::GetParseError_En(doc.GetParseError())), response);
+        return 400;
+    }
+    if (!doc.IsObject()) {
+        genResponseReturn(400, "Root must be a JSON object", response);
+        return 400;
+    }
+
+    rc = checkJsonFormat(doc, "user_token", jsonFieldType::IsInt64, response);
+    if (rc != 0) return rc;
+    rc = checkJsonFormat(doc, "old_password", jsonFieldType::IsString, response);
+    if (rc != 0) return rc;
+    rc = checkJsonFormat(doc, "new_password", jsonFieldType::IsString, response);
+    if (rc != 0) return rc;
+
+    int64_t token = doc["user_token"].GetInt64();
+    std::string oldPasswd = doc["old_password"].GetString();
+    std::string newPasswd = doc["new_password"].GetString();
+
+    if (newPasswd.length() < 4) {
+        genResponseReturn(400, "New password too short (min 4 chars)", response);
+        return 400;
+    }
+
+    // 验证 token（个人中心操作仅需有效 token，不需要权限码）
+    UserSession* session = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(this->user_tokens_mutex);
+        auto it = user_tokens.find(token);
+        if (it == user_tokens.end()) {
+            genResponseReturn(401, "Invalid token", response);
+            return 401;
+        }
+        session = it->second.get();
+    }
+
+    int uid = session->uid;
+    {
+        SQLHENV env = SQL_NULL_HANDLE;
+        SQLHDBC dbc = SQL_NULL_HANDLE;
+        SQLHSTMT stmt = SQL_NULL_HANDLE;
+        SQLRETURN ret;
+        char colPasswd[256];
+        SQLLEN ind;
+
+        ret = SQLAllocHandle(SQL_HANDLE_ENV, SQL_NULL_HANDLE, &env);
+        if (ret == SQL_SUCCESS || ret == SQL_SUCCESS_WITH_INFO) {
+            SQLSetEnvAttr(env, SQL_ATTR_ODBC_VERSION, (SQLPOINTER)SQL_OV_ODBC3, 0);
+            ret = SQLAllocHandle(SQL_HANDLE_DBC, env, &dbc);
+            if (ret == SQL_SUCCESS || ret == SQL_SUCCESS_WITH_INFO) {
+                std::string connStr = buildOdbcConnStr();
+                ret = SQLDriverConnect(dbc, nullptr, (SQLCHAR*)connStr.c_str(), SQL_NTS,
+                                       nullptr, 0, nullptr, SQL_DRIVER_COMPLETE);
+                if (ret == SQL_SUCCESS || ret == SQL_SUCCESS_WITH_INFO) {
+                    ret = SQLAllocHandle(SQL_HANDLE_STMT, dbc, &stmt);
+                    if (ret == SQL_SUCCESS || ret == SQL_SUCCESS_WITH_INFO) {
+                        // 查旧密码
+                        std::string sql = "SELECT passwd FROM users WHERE id = " + std::to_string(session->uid);
+                        ret = SQLExecDirect(stmt, (SQLCHAR*)sql.c_str(), SQL_NTS);
+                        if (ret == SQL_SUCCESS || ret == SQL_SUCCESS_WITH_INFO) {
+                            if (SQLFetch(stmt) == SQL_SUCCESS) {
+                                SQLGetData(stmt, 1, SQL_C_CHAR, colPasswd, sizeof(colPasswd), &ind);
+                            }
+                        }
+                        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+
+                        // 校验旧密码
+                        if (std::string(colPasswd) != oldPasswd) {
+                            SQLDisconnect(dbc);
+                            SQLFreeHandle(SQL_HANDLE_DBC, dbc);
+                            SQLFreeHandle(SQL_HANDLE_ENV, env);
+                            writeAuditLog(session->uid, session->username, session->role,
+                                          "update_password", "/api/update_password", "", "failure", "Wrong old password");
+                            genResponseReturn(403, "Old password is incorrect", response);
+                            return 403;
+                        }
+
+                        // 更新新密码
+                        ret = SQLAllocHandle(SQL_HANDLE_STMT, dbc, &stmt);
+                        if (ret == SQL_SUCCESS || ret == SQL_SUCCESS_WITH_INFO) {
+                            // 防止 SQL 注入：简单转义单引号
+                            std::string safePasswd;
+                            for (char c : newPasswd) {
+                                if (c == '\'') safePasswd += "''";
+                                else safePasswd += c;
+                            }
+                            std::string updateSql = "UPDATE users SET passwd = '" + safePasswd + "' WHERE id = " + std::to_string(session->uid);
+                            ret = SQLExecDirect(stmt, (SQLCHAR*)updateSql.c_str(), SQL_NTS);
+                            SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+                        }
+                    }
+                    SQLDisconnect(dbc);
+                }
+                SQLFreeHandle(SQL_HANDLE_DBC, dbc);
+            }
+            SQLFreeHandle(SQL_HANDLE_ENV, env);
+        }
+    }
+
+    writeAuditLog(session->uid, session->username, session->role,
+                  "update_password", "/api/update_password", "", "success");
+
+    genResponseReturn(200, "Password updated successfully", response);
+    return 0;
+}
+
+// ============================================================================
+// updateUserInfo: 修改当前用户基础信息（real_name, phone, mail, description）
+// ============================================================================
+int CSystem::updateUserInfo(const std::string& request, std::string& response) {
+    int rc = 0;
+    const std::string& jsonStr = request;
+
+    rapidjson::Document doc;
+    doc.Parse(jsonStr.c_str());
+    if (doc.HasParseError()) {
+        genResponseReturn(400, std::string(rapidjson::GetParseError_En(doc.GetParseError())), response);
+        return 400;
+    }
+    if (!doc.IsObject()) {
+        genResponseReturn(400, "Root must be a JSON object", response);
+        return 400;
+    }
+
+    rc = checkJsonFormat(doc, "user_token", jsonFieldType::IsInt64, response);
+    if (rc != 0) return rc;
+
+    int64_t token = doc["user_token"].GetInt64();
+
+    // 验证 token（个人中心操作仅需有效 token，不需要权限码）
+    UserSession* session = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(this->user_tokens_mutex);
+        auto it = user_tokens.find(token);
+        if (it == user_tokens.end()) {
+            genResponseReturn(401, "Invalid token", response);
+            return 401;
+        }
+        session = it->second.get();
+    }
+
+    int uid = session->uid;
+    std::string realName, phone, mail, desc;
+    if (doc.HasMember("real_name") && doc["real_name"].IsString()) {
+        realName = doc["real_name"].GetString();
+    }
+    if (doc.HasMember("phone") && doc["phone"].IsString()) {
+        phone = doc["phone"].GetString();
+    }
+    if (doc.HasMember("mail") && doc["mail"].IsString()) {
+        mail = doc["mail"].GetString();
+    }
+    if (doc.HasMember("description") && doc["description"].IsString()) {
+        desc = doc["description"].GetString();
+    }
+
+    // XSS 防护：去除 HTML 标签
+    auto stripHtml = [](const std::string& s) -> std::string {
+        std::string out;
+        bool inTag = false;
+        for (char c : s) {
+            if (c == '<') { inTag = true; continue; }
+            if (c == '>') { inTag = false; continue; }
+            if (!inTag) out += c;
+        }
+        return out;
+    };
+
+    realName = stripHtml(realName);
+    phone = stripHtml(phone);
+    mail = stripHtml(mail);
+    desc = stripHtml(desc);
+
+    // SQL 注入防护：转义单引号
+    auto escape = [](const std::string& s) -> std::string {
+        std::string out;
+        for (char c : s) {
+            if (c == '\'') out += "''";
+            else out += c;
+        }
+        return out;
+    };
+
+    // 更新 MySQL
+    {
+        SQLHENV env = SQL_NULL_HANDLE;
+        SQLHDBC dbc = SQL_NULL_HANDLE;
+        SQLHSTMT stmt = SQL_NULL_HANDLE;
+        SQLRETURN ret;
+
+        ret = SQLAllocHandle(SQL_HANDLE_ENV, SQL_NULL_HANDLE, &env);
+        if (ret == SQL_SUCCESS || ret == SQL_SUCCESS_WITH_INFO) {
+            SQLSetEnvAttr(env, SQL_ATTR_ODBC_VERSION, (SQLPOINTER)SQL_OV_ODBC3, 0);
+            ret = SQLAllocHandle(SQL_HANDLE_DBC, env, &dbc);
+            if (ret == SQL_SUCCESS || ret == SQL_SUCCESS_WITH_INFO) {
+                std::string connStr = buildOdbcConnStr();
+                ret = SQLDriverConnect(dbc, nullptr, (SQLCHAR*)connStr.c_str(), SQL_NTS,
+                                       nullptr, 0, nullptr, SQL_DRIVER_COMPLETE);
+                if (ret == SQL_SUCCESS || ret == SQL_SUCCESS_WITH_INFO) {
+                    ret = SQLAllocHandle(SQL_HANDLE_STMT, dbc, &stmt);
+                    if (ret == SQL_SUCCESS || ret == SQL_SUCCESS_WITH_INFO) {
+                        std::string sql = "UPDATE users SET real_name = '" + escape(realName) +
+                                          "', phone = '" + escape(phone) +
+                                          "', mail = '" + escape(mail) +
+                                          "', description = '" + escape(desc) +
+                                          "' WHERE id = " + std::to_string(session->uid);
+                        ret = SQLExecDirect(stmt, (SQLCHAR*)sql.c_str(), SQL_NTS);
+                        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+                    }
+                    SQLDisconnect(dbc);
+                }
+                SQLFreeHandle(SQL_HANDLE_DBC, dbc);
+            }
+            SQLFreeHandle(SQL_HANDLE_ENV, env);
+        }
+    }
+
+    writeAuditLog(session->uid, session->username, session->role,
+                  "update_user_info", "/api/update_user_info", "", "success");
+
+    genResponseReturn(200, "User info updated successfully", response);
     return 0;
 }
