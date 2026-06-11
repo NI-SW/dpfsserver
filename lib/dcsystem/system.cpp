@@ -680,6 +680,70 @@ trace_pros                | Array of Objects                   | 溯源结构列
 }
 
 // ============================================================================
+// dropTracablePro — 需要权限: product:drop
+// ============================================================================
+int CSystem::dropTracablePro(const std::string& request, std::string& response) {
+
+    int rc = 0;
+    rapidjson::Document doc;
+    doc.Parse(request.c_str());
+
+    if (doc.HasParseError()) {
+        genResponseReturn(400, std::string(rapidjson::GetParseError_En(doc.GetParseError())), response);
+        return 400;
+    }
+
+    if (!doc.IsObject()) {
+        genResponseReturn(400, "Root must be a JSON object", response);
+        return 400;
+    }
+
+    // 校验必填字段
+    rc = checkJsonFormat(doc, "user_token", jsonFieldType::IsInt64, response); if (rc != 0) { return rc; }
+    rc = checkJsonFormat(doc, "schema", jsonFieldType::IsString, response);   if (rc != 0) { return rc; }
+    rc = checkJsonFormat(doc, "product_name", jsonFieldType::IsString, response); if (rc != 0) { return rc; }
+
+    int64_t user_token = doc["user_token"].GetInt64();
+    std::string schema = doc["schema"].GetString();
+    std::string product_name = doc["product_name"].GetString();
+
+    if (schema.empty() || product_name.empty()) {
+        genResponseReturn(400, "schema and product_name must not be empty", response);
+        return 400;
+    }
+
+    // 鉴权
+    UserSession* session = nullptr;
+    rc = checkTokenAndPermission(user_token, "product:drop", session);
+    if (rc != 0) {
+        if (rc == -EACCES) { genResponseReturn(403, "Permission denied", response); }
+        else               { genResponseReturn(400, "Invalid user token", response); }
+        return 400;
+    }
+    CGrpcCli& client = *session->client;
+
+    // 调用底层 DropTracablePro
+    rc = client.DropTracablePro(schema, product_name);
+    if (rc != 0) {
+        cout << "DropTracablePro failed, error code: " << rc << endl;
+        cout << "Error message: " << client.msg << endl;
+        writeAuditLog(session->uid, session->username, session->role,
+                      "delete", "/api/drop_tracable_pro", "",
+                      "failure", "schema=" + schema + " product_name=" + product_name + " err=" + client.msg);
+        genResponseReturn(400, client.msg, response);
+        return 400;
+    }
+
+    // 审计日志
+    writeAuditLog(session->uid, session->username, session->role,
+                  "delete", "/api/drop_tracable_pro", "",
+                  "success", "schema=" + schema + " product_name=" + product_name);
+
+    genResponseReturn(200, "Drop successful", response);
+    return 0;
+}
+
+// ============================================================================
 // risk — 需要权限: product:risk:create
 // ============================================================================
 int CSystem::risk(const std::string& request, std::string& response) {

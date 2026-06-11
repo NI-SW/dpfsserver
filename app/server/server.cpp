@@ -77,6 +77,21 @@ int main(int argc, char* argv[]) {
             return res;
         });
 
+#define __DROP_TRACEABLE_PRO_API__
+    CROW_ROUTE(app, "/api/drop_tracable_pro")
+        .methods("POST"_method)([](const crow::request& req) {
+            // get json string
+            int rc = 0;
+            std::cout << "Received JSON: " << req.body << std::endl;
+            std::string msg = "";
+            rc = sys.dropTracablePro(req.body, msg);
+            if (rc != 0) {
+                return crow::response(rc, msg);
+            }
+            auto res = crow::response(200, msg);
+            return res;
+        });
+
 #define __RISK_API__
     CROW_ROUTE(app, "/api/risk")
         .methods("POST"_method)([](const crow::request& req) {

@@ -39,6 +39,7 @@ consumer                  | product:trace
 商品溯源(trace)           | product:trace                     | Y     | Y          | Y            | Y
 创建交易(make_trade)      | trade:create                      | Y     | N          | Y            | N
 数据查询(activity)        | product:list                      | Y     | Y          | Y            | N
+删除产品(drop_tracable)   | product:drop                      | Y     | Y          | N            | N
 风险查询(risk_query)      | product:risk:view                 | Y     | Y          | N            | N
 个人中心(profile)         | （无需权限）                       | Y     | Y          | Y            | Y
 
@@ -145,6 +146,46 @@ trace_pros                | Array of Objects                   | 溯源结构列
     {"group_name":"北京林业大学",product_name:"草莓派","trace_code_prefix":"00000000000000001D01000000000000"}
   ]
 }
+```
+
+# 描述
+```
+删除指定的可溯源产品
+```
+# URL
+```
+/api/drop_tracable_pro
+```
+# METHOD
+```
+POST
+```
+# Request
+parameter                 | type                              | describe
+------------------------- | ----------------------------------| ----------------------------------
+user_token                | Number                            |
+schema                    | String                            | 溯源组名称（schema_name）
+product_name              | String                            | 产品名称
+# Response
+parameter                 | type                              | describe
+------------------------- | ----------------------------------| ----------------------------------
+code                      | Number                            | 状态码，200表示成功
+message                   | String                            | 状态信息
+# example request
+```
+{
+  "user_token": 0,
+  "schema": "OOO",
+  "product_name": "烧烤酱"
+}
+```
+# example response
+```
+{"code":200,"message":"Drop successful"}
+```
+# 权限要求
+```
+product:drop — 仅 admin 和 supervisor 角色拥有此权限
 ```
 
 # 描述

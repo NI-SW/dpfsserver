@@ -65,6 +65,7 @@ public:
     */
     int listTracablePro(const std::string& request, std::string& response);
     // int listTables(const std::string& request, std::string& response);
+    int dropTracablePro(const std::string& request, std::string& response);
     int risk(const std::string& request, std::string& response);
     int traceBack(const std::string& request, std::string& response);
     /*
