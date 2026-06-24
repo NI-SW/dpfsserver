@@ -5,9 +5,16 @@
 #include <rapidjson/stringbuffer.h>
 #include <deepseek/deepseek.hpp>
 #include <fstream>
+#include <sstream>
 #include <sql.h>
 #include <sqlext.h>
 #include <cstring>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <vector>
+#include <dirent.h>
+#include <set>
+#include <functional>
 
 #include "rapidjson/prettywriter.h"
 
@@ -530,9 +537,8 @@ int CSystem::listTracablePro(const std::string& request, std::string& response) 
     UserSession* session = nullptr;
     rc = checkTokenAndPermission(user_token, "product:list", session);
     if (rc != 0) {
-        if (rc == -EACCES) { genResponseReturn(403, "Permission denied", response); }
-        else               { genResponseReturn(400, "Invalid user token", response); }
-        return 400;
+        if (rc == -EACCES) { genResponseReturn(403, "Permission denied", response); return 403; }
+        else               { genResponseReturn(401, "Invalid user token", response); return 401; }
     }
     CGrpcCli& client = *session->client;
     /*
@@ -667,6 +673,33 @@ trace_pros                | Array of Objects                   | 溯源结构列
         return rc;
     }
 
+    // 修正 total：dpfs 迭代器按 begin+limit 分页时 total 不正确，
+    // 此处重新查询 begin=0 获取真实总数
+    size_t trueTotal = total;
+    {
+        rc = client.getTableHandle("SYSDPFS", "SYSTRACEABLES");
+        if (rc == 0) {
+            std::vector<std::string> cntCol;
+            cntCol.emplace_back();
+            cntCol[0].resize(8);
+            int64_t zero = 0;
+            memcpy(const_cast<char*>(cntCol[0].data()), &zero, sizeof(zero));
+            IDXHANDLE cntHidx = 0;
+            rc = client.getIdxIter({"TID"}, cntCol, cntHidx);
+            if (rc == 0) {
+                trueTotal = 0;
+                rc = client.fetchNextRow(cntHidx);
+                while (rc == 0) {
+                    trueTotal++;
+                    rc = client.fetchNextRow(cntHidx);
+                }
+                client.releaseIdxIter(cntHidx);
+            }
+            client.releaseTableHandle();
+        }
+    }
+    docRet["total"].SetInt64(trueTotal);
+
     docRet.AddMember("code", 200, allocator);
     docRet.AddMember("message", "", allocator);
     
@@ -716,9 +749,8 @@ int CSystem::dropTracablePro(const std::string& request, std::string& response) 
     UserSession* session = nullptr;
     rc = checkTokenAndPermission(user_token, "product:drop", session);
     if (rc != 0) {
-        if (rc == -EACCES) { genResponseReturn(403, "Permission denied", response); }
-        else               { genResponseReturn(400, "Invalid user token", response); }
-        return 400;
+        if (rc == -EACCES) { genResponseReturn(403, "Permission denied", response); return 403; }
+        else               { genResponseReturn(401, "Invalid user token", response); return 401; }
     }
     CGrpcCli& client = *session->client;
 
@@ -778,9 +810,8 @@ int CSystem::risk(const std::string& request, std::string& response) {
     UserSession* session = nullptr;
     rc = checkTokenAndPermission(doc["user_token"].GetInt64(), "product:risk:create", session);
     if (rc != 0) {
-        if (rc == -EACCES) { genResponseReturn(403, "Permission denied", response); }
-        else               { genResponseReturn(400, "Invalid user token", response); }
-        return 400;
+        if (rc == -EACCES) { genResponseReturn(403, "Permission denied", response); return 403; }
+        else               { genResponseReturn(401, "Invalid user token", response); return 401; }
     }
     CGrpcCli& client = *session->client;
 
@@ -1198,9 +1229,8 @@ int CSystem::traceBack(const std::string& request, std::string& response) {
     UserSession* session = nullptr;
     rc = checkTokenAndPermission(doc["user_token"].GetInt64(), "product:trace", session);
     if (rc != 0) {
-        if (rc == -EACCES) { genResponseReturn(403, "Permission denied", response); }
-        else               { genResponseReturn(400, "Invalid user token", response); }
-        return 400;
+        if (rc == -EACCES) { genResponseReturn(403, "Permission denied", response); return 403; }
+        else               { genResponseReturn(401, "Invalid user token", response); return 401; }
     }
     CGrpcCli& client = *session->client;
 
@@ -1431,11 +1461,12 @@ int CSystem::traceBack(const std::string& request, std::string& response) {
     rapidjson::Document metaTableArr;
     metaTableArr.SetArray();
     for (const auto& [name, cumulativePct] : metaIngredients) {
-        // 过滤：累计占比为0 或 克数为0 的条目（通常为底层数据异常导致的乱码配料）
-        double grams = totalGrams * cumulativePct;
-        if (cumulativePct <= 0.0 || grams <= 0.0) {
+        // 过滤：累计占比为0 的条目（通常为底层数据异常导致的乱码配料）
+        if (cumulativePct <= 0.0) {
             continue;
         }
+
+        double grams = totalGrams * cumulativePct;
 
         rapidjson::Document metaItem;
         metaItem.SetObject();
@@ -1446,7 +1477,7 @@ int CSystem::traceBack(const std::string& request, std::string& response) {
         snprintf(pctBuf, sizeof(pctBuf), "%.2f%%", cumulativePct * 100.0);
         metaItem.AddMember("percentage", rapidjson::Value(pctBuf, metaTableArr.GetAllocator()), metaTableArr.GetAllocator());
 
-        // 克数
+        // 克数（仅当 totalGrams > 0 时计算，否则为 0）
         char gramBuf[32];
         snprintf(gramBuf, sizeof(gramBuf), "%.2f", grams);
         metaItem.AddMember("grams", rapidjson::Value(gramBuf, metaTableArr.GetAllocator()), metaTableArr.GetAllocator());
@@ -1505,9 +1536,8 @@ int CSystem::listProBasic(const std::string& request, std::string& response) {
     UserSession* session = nullptr;
     rc = checkTokenAndPermission(doc["user_token"].GetInt64(), "product:list", session);
     if (rc != 0) {
-        if (rc == -EACCES) { genResponseReturn(403, "Permission denied", response); }
-        else               { genResponseReturn(400, "Invalid user token", response); }
-        return 400;
+        if (rc == -EACCES) { genResponseReturn(403, "Permission denied", response); return 403; }
+        else               { genResponseReturn(401, "Invalid user token", response); return 401; }
     }
     CGrpcCli& client = *session->client;
 
@@ -1688,6 +1718,15 @@ int CSystem::makeTrade(const std::string& request, std::string& response) {
     std::string tradePrice = "";
 
     rc = checkJsonFormat(doc, "user_token", jsonFieldType::IsInt64, response); if (rc != 0) { return rc; }
+
+    // Permission check FIRST — so unauthorized roles get 403, not 400
+    UserSession* session = nullptr;
+    rc = checkTokenAndPermission(doc["user_token"].GetInt64(), "trade:create", session);
+    if (rc != 0) {
+        if (rc == -EACCES) { genResponseReturn(403, "Permission denied", response); return 403; }
+        else               { genResponseReturn(401, "Invalid user token", response); return 401; }
+    }
+
     rc = checkJsonFormat(doc, "trade_schema", jsonFieldType::IsString, response); if (rc == 0) { tradeSchema = doc["trade_schema"].GetString(); }
     rc = checkJsonFormat(doc, "trade_product_name", jsonFieldType::IsString, response); if (rc == 0) { tradeProductName = doc["trade_product_name"].GetString(); }
     rc = checkJsonFormat(doc, "trade_product_start_id", jsonFieldType::IsInt64, response); if (rc == 0) { tradeProductStartID = doc["trade_product_start_id"].GetInt64(); }
@@ -1716,14 +1755,17 @@ int CSystem::makeTrade(const std::string& request, std::string& response) {
     if (logisticsInfo == "")    { genResponseReturn(400, "Invalid Param", response); return 400; };
     if (otherInfo == "")        { genResponseReturn(400, "Invalid Param", response); return 400; };
     if (tradePrice == "")       { genResponseReturn(400, "Invalid Param", response); return 400; };
-
-    UserSession* session = nullptr;
-    rc = checkTokenAndPermission(doc["user_token"].GetInt64(), "trade:create", session);
-    if (rc != 0) {
-        if (rc == -EACCES) { genResponseReturn(403, "Permission denied", response); }
-        else               { genResponseReturn(400, "Invalid user token", response); }
-        return 400;
+    // dpfs product instance IDs start from 0; start_id < 0 causes trade to silently
+    // not appear in traceBack results.  Clamp to 0 as a safety net.
+    // NOTE: dpfs gRPC server currently ignores start_uid and always binds trades
+    // to instance 0 (SPJYQSID is always 0 in traceBack results).  Force start_id
+    // to 0 so that trades created with start_id>0 don't silently disappear.
+    if (tradeProductStartID != 0) {
+        cout << "[WARN] makeTrade: trade_product_start_id=" << tradeProductStartID
+             << " was non-zero, but dpfs only supports instance 0. Clamping to 0." << endl;
+        tradeProductStartID = 0;
     }
+
     CGrpcCli& client = *session->client;
 
     rc = client.makeTrade(tradeSchema, tradeProductName, 999/*deprecated*/, tradeProductStartID, tradeProductNumber, buyer, buyerAddr, buyerPhone, seller, sellerAddr, sellerPhone, logisticsInfo, otherInfo, tradePrice);
@@ -1775,9 +1817,8 @@ int CSystem::listRiskPro(const std::string& request, std::string& response) {
     UserSession* session = nullptr;
     rc = checkTokenAndPermission(user_token, "product:risk:view", session);
     if (rc != 0) {
-        if (rc == -EACCES) { genResponseReturn(403, "Permission denied", response); }
-        else               { genResponseReturn(400, "Invalid user token", response); }
-        return 400;
+        if (rc == -EACCES) { genResponseReturn(403, "Permission denied", response); return 403; }
+        else               { genResponseReturn(401, "Invalid user token", response); return 401; }
     }
     CGrpcCli& client = *session->client;
     /*
@@ -2270,5 +2311,473 @@ int CSystem::updateUserInfo(const std::string& request, std::string& response) {
                   "update_user_info", "/api/update_user_info", "", "success");
 
     genResponseReturn(200, "User info updated successfully", response);
+    return 0;
+}
+
+// ========== Base64 解码 ==========
+static const std::string base64_chars =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "abcdefghijklmnopqrstuvwxyz"
+    "0123456789+/";
+
+static inline bool is_base64(unsigned char c) {
+    return (isalnum(c) || (c == '+') || (c == '/'));
+}
+
+static std::vector<unsigned char> base64_decode(const std::string& encoded_string) {
+    int in_len = encoded_string.size();
+    int i = 0;
+    int j = 0;
+    int in_ = 0;
+    unsigned char char_array_4[4], char_array_3[3];
+    std::vector<unsigned char> ret;
+
+    while (in_len-- && (encoded_string[in_] != '=') && is_base64(encoded_string[in_])) {
+        char_array_4[i++] = encoded_string[in_]; in_++;
+        if (i == 4) {
+            for (i = 0; i < 4; i++)
+                char_array_4[i] = base64_chars.find(char_array_4[i]);
+
+            char_array_3[0] = (char_array_4[0] << 2) + ((char_array_4[1] & 0x30) >> 4);
+            char_array_3[1] = ((char_array_4[1] & 0xf) << 4) + ((char_array_4[2] & 0x3c) >> 2);
+            char_array_3[2] = ((char_array_4[2] & 0x3) << 6) + char_array_4[3];
+
+            for (i = 0; i < 3; i++)
+                ret.push_back(char_array_3[i]);
+            i = 0;
+        }
+    }
+
+    if (i) {
+        for (j = i; j < 4; j++)
+            char_array_4[j] = 0;
+        for (j = 0; j < 4; j++)
+            char_array_4[j] = base64_chars.find(char_array_4[j]);
+
+        char_array_3[0] = (char_array_4[0] << 2) + ((char_array_4[1] & 0x30) >> 4);
+        char_array_3[1] = ((char_array_4[1] & 0xf) << 4) + ((char_array_4[2] & 0x3c) >> 2);
+
+        for (j = 0; j < i - 1; j++)
+            ret.push_back(char_array_3[j]);
+    }
+
+    return ret;
+}
+
+// 递归创建目录
+static bool mkdir_p(const std::string& path) {
+    size_t pos = 0;
+    std::string dir;
+    while ((pos = path.find('/', pos + 1)) != std::string::npos) {
+        dir = path.substr(0, pos);
+        if (mkdir(dir.c_str(), 0755) != 0 && errno != EEXIST) return false;
+    }
+    if (mkdir(path.c_str(), 0755) != 0 && errno != EEXIST) return false;
+    return true;
+}
+
+// ============================================================================
+// registerUser — 用户注册（无需登录）
+// ============================================================================
+int CSystem::registerUser(const std::string& request, std::string& response) {
+
+    int rc = 0;
+    rapidjson::Document doc;
+    doc.Parse(request.c_str());
+
+    if (doc.HasParseError()) {
+        genResponseReturn(400, std::string(rapidjson::GetParseError_En(doc.GetParseError())), response);
+        return 400;
+    }
+    if (!doc.IsObject()) {
+        genResponseReturn(400, "Root must be a JSON object", response);
+        return 400;
+    }
+
+    rc = checkJsonFormat(doc, "username", jsonFieldType::IsString, response); if (rc != 0) return rc;
+    rc = checkJsonFormat(doc, "password", jsonFieldType::IsString, response); if (rc != 0) return rc;
+    rc = checkJsonFormat(doc, "role",     jsonFieldType::IsString, response); if (rc != 0) return rc;
+
+    std::string username = doc["username"].GetString();
+    std::string password = doc["password"].GetString();
+    std::string role     = doc["role"].GetString();
+
+    // 可选字段
+    std::string realName    = doc.HasMember("real_name")   && doc["real_name"].IsString()   ? doc["real_name"].GetString()   : "";
+    std::string description = doc.HasMember("description") && doc["description"].IsString() ? doc["description"].GetString() : "";
+    std::string phone       = doc.HasMember("phone")       && doc["phone"].IsString()       ? doc["phone"].GetString()       : "";
+    std::string mail        = doc.HasMember("mail")        && doc["mail"].IsString()        ? doc["mail"].GetString()        : "";
+
+    // 输入校验
+    if (username.empty()) {
+        genResponseReturn(400, "Username must not be empty", response);
+        return 400;
+    }
+    if (password.empty()) {
+        genResponseReturn(400, "Password must not be empty", response);
+        return 400;
+    }
+    if (password.length() < 6) {
+        genResponseReturn(400, "Password must be at least 6 characters", response);
+        return 400;
+    }
+    // 合法角色列表（仅允许消费者和生产商注册）
+    if (role != "manufacturer" && role != "consumer") {
+        genResponseReturn(400, "Invalid role. Must be one of: consumer, manufacturer", response);
+        return 400;
+    }
+
+    // ─── MySQL ODBC：检查用户名是否已存在 → 插入新用户 ───
+    SQLHENV env = SQL_NULL_HANDLE;
+    SQLHDBC  dbc = SQL_NULL_HANDLE;
+    SQLHSTMT stmt = SQL_NULL_HANDLE;
+    SQLRETURN ret;
+
+    ret = SQLAllocHandle(SQL_HANDLE_ENV, SQL_NULL_HANDLE, &env);
+    if (ret != SQL_SUCCESS && ret != SQL_SUCCESS_WITH_INFO) {
+        genResponseReturn(500, "Database error", response);
+        return 500;
+    }
+    SQLSetEnvAttr(env, SQL_ATTR_ODBC_VERSION, (SQLPOINTER)SQL_OV_ODBC3, 0);
+
+    ret = SQLAllocHandle(SQL_HANDLE_DBC, env, &dbc);
+    if (ret != SQL_SUCCESS && ret != SQL_SUCCESS_WITH_INFO) {
+        SQLFreeHandle(SQL_HANDLE_ENV, env);
+        genResponseReturn(500, "Database error", response);
+        return 500;
+    }
+
+    std::string connStr = buildOdbcConnStr();
+    ret = SQLDriverConnect(dbc, nullptr, (SQLCHAR*)connStr.c_str(), SQL_NTS,
+                           nullptr, 0, nullptr, SQL_DRIVER_COMPLETE);
+    if (ret != SQL_SUCCESS && ret != SQL_SUCCESS_WITH_INFO) {
+        SQLFreeHandle(SQL_HANDLE_DBC, dbc);
+        SQLFreeHandle(SQL_HANDLE_ENV, env);
+        genResponseReturn(500, "Database connection failed", response);
+        return 500;
+    }
+
+    ret = SQLAllocHandle(SQL_HANDLE_STMT, dbc, &stmt);
+    if (ret != SQL_SUCCESS && ret != SQL_SUCCESS_WITH_INFO) {
+        SQLDisconnect(dbc);
+        SQLFreeHandle(SQL_HANDLE_DBC, dbc);
+        SQLFreeHandle(SQL_HANDLE_ENV, env);
+        genResponseReturn(500, "Database error", response);
+        return 500;
+    }
+
+    // 检查用户名是否已存在
+    std::string sql = "SELECT id FROM users WHERE name = '" + username + "'";
+    ret = SQLExecDirect(stmt, (SQLCHAR*)sql.c_str(), SQL_NTS);
+    if (ret == SQL_SUCCESS || ret == SQL_SUCCESS_WITH_INFO) {
+        if (SQLFetch(stmt) == SQL_SUCCESS) {
+            SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+            SQLDisconnect(dbc);
+            SQLFreeHandle(SQL_HANDLE_DBC, dbc);
+            SQLFreeHandle(SQL_HANDLE_ENV, env);
+            genResponseReturn(409, "Username already exists", response);
+            return 409;
+        }
+    }
+    SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+
+    // 插入新用户
+    ret = SQLAllocHandle(SQL_HANDLE_STMT, dbc, &stmt);
+    if (ret != SQL_SUCCESS && ret != SQL_SUCCESS_WITH_INFO) {
+        SQLDisconnect(dbc);
+        SQLFreeHandle(SQL_HANDLE_DBC, dbc);
+        SQLFreeHandle(SQL_HANDLE_ENV, env);
+        genResponseReturn(500, "Database error", response);
+        return 500;
+    }
+
+    // 转义单引号
+    auto esc = [](const std::string& s) -> std::string {
+        std::string r;
+        for (char c : s) {
+            r += c;
+            if (c == '\'') r += '\'';
+        }
+        return r;
+    };
+
+    sql = "INSERT INTO users (name, role, passwd, real_name, description, phone, mail, status) "
+          "VALUES ('" + esc(username) + "', '" + esc(role) + "', '" + esc(password) + "', '" +
+          esc(realName) + "', '" + esc(description) + "', '" + esc(phone) + "', '" +
+          esc(mail) + "', 'active')";
+
+    ret = SQLExecDirect(stmt, (SQLCHAR*)sql.c_str(), SQL_NTS);
+    if (ret != SQL_SUCCESS && ret != SQL_SUCCESS_WITH_INFO) {
+        cerr << "Register INSERT failed: " << sql << endl;
+        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        SQLDisconnect(dbc);
+        SQLFreeHandle(SQL_HANDLE_DBC, dbc);
+        SQLFreeHandle(SQL_HANDLE_ENV, env);
+        genResponseReturn(500, "Failed to create user", response);
+        return 500;
+    }
+
+    SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+    SQLDisconnect(dbc);
+    SQLFreeHandle(SQL_HANDLE_DBC, dbc);
+    SQLFreeHandle(SQL_HANDLE_ENV, env);
+
+    cout << "User registered: " << username << " (role: " << role << ")" << endl;
+
+    // 审计日志 (uid=0 因为是新用户，尚未登录)
+    writeAuditLog(0, username, role, "register", "/api/register", "", "success");
+
+    genResponseReturn(200, "Registration successful", response);
+    return 0;
+}
+
+int CSystem::uploadFile(const std::string& request, std::string& response) {
+    int rc = 0;
+    const std::string& jsonStr = request;
+
+    rapidjson::Document doc;
+    doc.Parse(jsonStr.c_str());
+    if (doc.HasParseError()) {
+        genResponseReturn(400, std::string(rapidjson::GetParseError_En(doc.GetParseError())), response);
+        return 400;
+    }
+    if (!doc.IsObject()) {
+        genResponseReturn(400, "Root must be a JSON object", response);
+        return 400;
+    }
+
+    rc = checkJsonFormat(doc, "user_token", jsonFieldType::IsInt64, response);
+    if (rc != 0) return rc;
+
+    rc = checkJsonFormat(doc, "schema", jsonFieldType::IsString, response);
+    if (rc != 0) return rc;
+
+    rc = checkJsonFormat(doc, "product_name", jsonFieldType::IsString, response);
+    if (rc != 0) return rc;
+
+    rc = checkJsonFormat(doc, "file_name", jsonFieldType::IsString, response);
+    if (rc != 0) return rc;
+
+    rc = checkJsonFormat(doc, "file_content", jsonFieldType::IsString, response);
+    if (rc != 0) return rc;
+
+    int64_t token = doc["user_token"].GetInt64();
+
+    // 验证 token
+    {
+        std::lock_guard<std::mutex> lock(this->user_tokens_mutex);
+        auto it = user_tokens.find(token);
+        if (it == user_tokens.end()) {
+            genResponseReturn(401, "Invalid token", response);
+            return 401;
+        }
+    }
+
+    std::string schema = doc["schema"].GetString();
+    std::string productName = doc["product_name"].GetString();
+    std::string fileName = doc["file_name"].GetString();
+    std::string fileContentB64 = doc["file_content"].GetString();
+
+    // 安全校验：防止路径遍历
+    if (schema.empty() || productName.empty() || fileName.empty()) {
+        genResponseReturn(400, "schema, product_name and file_name must not be empty", response);
+        return 400;
+    }
+
+    // 构建目标路径: /home/dpfs/github/dpfsserver/uploads/<schema>/<product_name>/
+    std::string baseDir = "/home/dpfs/github/dpfsserver/uploads";
+    std::string dirPath = baseDir + "/" + schema + "/" + productName;
+    std::string filePath = dirPath + "/" + fileName;
+
+    // 创建目录
+    if (!mkdir_p(dirPath)) {
+        genResponseReturn(500, "Failed to create directory: " + dirPath, response);
+        return 500;
+    }
+
+    // 解码并写入文件
+    std::vector<unsigned char> decoded = base64_decode(fileContentB64);
+
+    std::ofstream outFile(filePath, std::ios::binary);
+    if (!outFile.is_open()) {
+        genResponseReturn(500, "Failed to open file for writing: " + filePath, response);
+        return 500;
+    }
+    outFile.write(reinterpret_cast<const char*>(decoded.data()), decoded.size());
+    outFile.close();
+
+    // 返回文件路径
+    rapidjson::Document retDoc;
+    retDoc.SetObject();
+    rapidjson::Document::AllocatorType& allocator = retDoc.GetAllocator();
+    retDoc.AddMember("code", 200, allocator);
+    retDoc.AddMember("message", "File uploaded successfully", allocator);
+    rapidjson::Value fp;
+    fp.SetString(filePath.c_str(), allocator);
+    retDoc.AddMember("file_path", fp, allocator);
+
+    rapidjson::StringBuffer buffer;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+    retDoc.Accept(writer);
+    response = buffer.GetString();
+
+    std::cout << "[UPLOAD] File saved: " << filePath << " (" << decoded.size() << " bytes)" << std::endl;
+    return 0;
+}
+
+int CSystem::listFiles(const std::string& request, std::string& response) {
+    int rc = 0;
+    const std::string& jsonStr = request;
+
+    rapidjson::Document doc;
+    doc.Parse(jsonStr.c_str());
+    if (doc.HasParseError()) {
+        genResponseReturn(400, std::string(rapidjson::GetParseError_En(doc.GetParseError())), response);
+        return 400;
+    }
+    if (!doc.IsObject()) {
+        genResponseReturn(400, "Root must be a JSON object", response);
+        return 400;
+    }
+
+    rc = checkJsonFormat(doc, "user_token", jsonFieldType::IsInt64, response);
+    if (rc != 0) return rc;
+
+    rc = checkJsonFormat(doc, "schema", jsonFieldType::IsString, response);
+    if (rc != 0) return rc;
+
+    rc = checkJsonFormat(doc, "product_name", jsonFieldType::IsString, response);
+    if (rc != 0) return rc;
+
+    int64_t token = doc["user_token"].GetInt64();
+    std::shared_ptr<CGrpcCli> clientPtr;
+    {
+        std::lock_guard<std::mutex> lock(this->user_tokens_mutex);
+        auto it = user_tokens.find(token);
+        if (it == user_tokens.end()) {
+            genResponseReturn(401, "Invalid token", response);
+            return 401;
+        }
+        clientPtr = it->second->client;
+    }
+
+    std::string schema = doc["schema"].GetString();
+    std::string productName = doc["product_name"].GetString();
+
+    if (schema.empty() || productName.empty()) {
+        genResponseReturn(400, "schema and product_name must not be empty", response);
+        return 400;
+    }
+
+    std::string dirPath = "/home/dpfs/github/dpfsserver/uploads/" + schema + "/" + productName;
+    const std::string uploadsPrefix = "/home/dpfs/github/dpfsserver/uploads/";
+
+    rapidjson::Document retDoc;
+    retDoc.SetObject();
+    rapidjson::Document::AllocatorType& allocator = retDoc.GetAllocator();
+    rapidjson::Value filesArr(rapidjson::kArrayType);
+
+    // 用于去重
+    std::set<std::string> seenPaths;
+
+    // 扫描目录
+    DIR* dir = opendir(dirPath.c_str());
+    if (dir) {
+        struct dirent* entry;
+        while ((entry = readdir(dir)) != nullptr) {
+            if (entry->d_type == DT_REG) {
+                std::string fileName = entry->d_name;
+                std::string fullPath = dirPath + "/" + fileName;
+                struct stat st;
+                if (stat(fullPath.c_str(), &st) == 0) {
+                    rapidjson::Value fileObj(rapidjson::kObjectType);
+                    rapidjson::Value fn;
+                    fn.SetString(fileName.c_str(), allocator);
+                    fileObj.AddMember("name", fn, allocator);
+                    rapidjson::Value fp;
+                    fp.SetString(fullPath.c_str(), allocator);
+                    fileObj.AddMember("path", fp, allocator);
+                    fileObj.AddMember("size", (int64_t)st.st_size, allocator);
+                    filesArr.PushBack(fileObj, allocator);
+                    seenPaths.insert(fullPath);
+                }
+            }
+        }
+        closedir(dir);
+    }
+
+    // 额外从 base_info 中提取引用的文件路径（解决 productName 变更导致目录不匹配的问题）
+    {
+        CGrpcCli& client = *clientPtr;
+        std::string spxxb = productName + "_SPXXB";
+        rc = client.getTableHandle(schema, spxxb);
+        if (rc == 0) {
+            int32_t hidx = 0;
+            std::vector<std::string> idxNames;
+            rc = client.getIdxIter(idxNames, {}, hidx);
+            if (rc == 0) {
+                while (client.fetchNextRow(hidx) == 0) {
+                    std::string oval;
+                    // 读取 key (col 0)
+                    rc = client.getDataByIdxIter(hidx, 0, oval, dpfs_ctype_t::TYPE_STRING);
+                    if (rc != 0) continue;
+                    // 跳过系统内部 key
+                    if (memcmp(oval.c_str(), "SPKZB", 5) == 0 ||
+                        memcmp(oval.c_str(), "PLKZB", 5) == 0 ||
+                        memcmp(oval.c_str(), "SPJYB", 5) == 0) continue;
+
+                    // 读取 value (col 1)
+                    std::string vval;
+                    rc = client.getDataByIdxIter(hidx, 1, vval, dpfs_ctype_t::TYPE_STRING);
+                    if (rc != 0 || vval.empty()) continue;
+
+                    // 检查 value 是否引用 uploads 路径
+                    size_t pos = vval.find(uploadsPrefix);
+                    if (pos != std::string::npos) {
+                        std::string filePath = vval.substr(pos);
+                        while (!filePath.empty() && (filePath.back() == ' ' || filePath.back() == '\n' || filePath.back() == '\r'))
+                            filePath.pop_back();
+                        struct stat st;
+                        if (stat(filePath.c_str(), &st) == 0 && seenPaths.find(filePath) == seenPaths.end()) {
+                            std::string fileName = filePath;
+                            size_t lastSlash = filePath.rfind('/');
+                            if (lastSlash != std::string::npos) fileName = filePath.substr(lastSlash + 1);
+                            rapidjson::Value fileObj(rapidjson::kObjectType);
+                            rapidjson::Value fn;
+                            fn.SetString(fileName.c_str(), allocator);
+                            fileObj.AddMember("name", fn, allocator);
+                            rapidjson::Value fp;
+                            fp.SetString(filePath.c_str(), allocator);
+                            fileObj.AddMember("path", fp, allocator);
+                            fileObj.AddMember("size", (int64_t)st.st_size, allocator);
+                            filesArr.PushBack(fileObj, allocator);
+                            seenPaths.insert(filePath);
+                        }
+                    }
+                }
+                client.releaseIdxIter(hidx);
+            }
+            client.releaseTableHandle();
+        }
+    }
+
+    retDoc.AddMember("code", 200, allocator);
+    std::string msgText = filesArr.Size() > 0 ? "OK" : "No files found";
+    rapidjson::Value msg;
+    msg.SetString(msgText.c_str(), allocator);
+    retDoc.AddMember("message", msg, allocator);
+    retDoc.AddMember("files", filesArr, allocator);
+
+    rapidjson::StringBuffer buffer;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+    retDoc.Accept(writer);
+    response = buffer.GetString();
+    return 0;
+}
+
+int CSystem::serveFile(const std::string& request, std::string& response) {
+    // 此方法不走 JSON 解析，由 server.cpp 直接读取文件并返回
+    // response 就是文件路径
+    response = request;
     return 0;
 }

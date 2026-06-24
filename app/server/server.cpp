@@ -1,5 +1,7 @@
 
 #define CROW_USE_BOOST
+// CRA build puts assets under static/static/; point Crow's static dir there
+#define CROW_STATIC_DIRECTORY "static/static/"
 #include <crow.h>
 #include <iostream>
 #include <rapidjson/document.h>
@@ -7,6 +9,9 @@
 #include <rapidjson/writer.h>
 #include <rapidjson/stringbuffer.h>
 #include <dcsystem/system.hpp>
+#include <fstream>
+#include <sstream>
+#include <iomanip>
 initSystemInfo initInfo;
 CSystem sys;
 
@@ -47,6 +52,20 @@ int main(int argc, char* argv[]) {
             return res;
         });
     
+#define __REGISTER_API__
+    CROW_ROUTE(app, "/api/register")
+        .methods("POST"_method)([](const crow::request& req) {
+            int rc = 0;
+            std::cout << "Received register request: " << req.body << std::endl;
+            std::string msg = "";
+            rc = sys.registerUser(req.body, msg);
+            if (rc != 0) {
+                return crow::response(rc, msg);
+            }
+            auto res = crow::response(200, msg);
+            return res;
+        });
+
 #define __LOGOUT_API__
     CROW_ROUTE(app, "/api/logout")
         .methods("POST"_method)([](const crow::request& req) {
@@ -209,7 +228,152 @@ int main(int argc, char* argv[]) {
             return res;
         });
 
+#define __UPLOAD_FILE_API__
+    CROW_ROUTE(app, "/api/upload")
+        .methods("POST"_method)([](const crow::request& req) {
+            int rc = 0;
+            std::cout << "Received upload request, body size: " << req.body.size() << std::endl;
+            std::string msg = "";
+            rc = sys.uploadFile(req.body, msg);
+            if (rc != 0) {
+                return crow::response(rc, msg);
+            }
+            auto res = crow::response(200, msg);
+            return res;
+        });
+
+#define __LIST_FILES_API__
+    CROW_ROUTE(app, "/api/list_files")
+        .methods("POST"_method)([](const crow::request& req) {
+            int rc = 0;
+            std::cout << "Received list_files request: " << req.body << std::endl;
+            std::string msg = "";
+            rc = sys.listFiles(req.body, msg);
+            if (rc != 0) {
+                return crow::response(rc, msg);
+            }
+            auto res = crow::response(200, msg);
+            return res;
+        });
+
+    // 提供文件访问：GET /api/serve_file?path=...
+    CROW_ROUTE(app, "/api/serve_file")
+        .methods("GET"_method)([](const crow::request& req) {
+            auto pathIt = req.url_params.get("path");
+            if (!pathIt) {
+                return crow::response(400, "Missing 'path' parameter");
+            }
+            std::string filePath(pathIt);
+
+            // 安全检查：只允许访问 uploads 目录
+            if (filePath.find("/home/dpfs/github/dpfsserver/uploads/") != 0 || filePath.find("..") != std::string::npos) {
+                return crow::response(403, "Access denied");
+            }
+
+            std::ifstream file(filePath, std::ios::binary);
+            if (!file.is_open()) {
+                return crow::response(404, "File not found");
+            }
+
+            std::string content((std::istreambuf_iterator<char>(file)),
+                                std::istreambuf_iterator<char>());
+            file.close();
+
+            auto res = crow::response(content);
+
+            // 提取文件名
+            std::string filename = filePath;
+            size_t lastSlash = filePath.rfind('/');
+            if (lastSlash != std::string::npos) filename = filePath.substr(lastSlash + 1);
+
+            // RFC 5987 编码：将非 ASCII 文件名正确编码，避免代理/浏览器乱码
+            auto urlEncodeFilename = [](const std::string& s) -> std::string {
+                std::ostringstream escaped;
+                for (unsigned char c : s) {
+                    if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+                        escaped << c;
+                    } else {
+                        escaped << '%' << std::uppercase << std::setw(2) << std::setfill('0') << std::hex << (int)c;
+                    }
+                }
+                return escaped.str();
+            };
+
+            // 根据扩展名设置 MIME type
+            std::string ext;
+            size_t dot = filePath.rfind('.');
+            if (dot != std::string::npos) ext = filePath.substr(dot);
+
+            if (ext == ".mp4")  res.set_header("Content-Type", "video/mp4");
+            else if (ext == ".webm") res.set_header("Content-Type", "video/webm");
+            else if (ext == ".avi")  res.set_header("Content-Type", "video/x-msvideo");
+            else if (ext == ".mov")  res.set_header("Content-Type", "video/quicktime");
+            else if (ext == ".mp3")  res.set_header("Content-Type", "audio/mpeg");
+            else if (ext == ".wav")  res.set_header("Content-Type", "audio/wav");
+            else if (ext == ".jpg" || ext == ".jpeg") res.set_header("Content-Type", "image/jpeg");
+            else if (ext == ".png")  res.set_header("Content-Type", "image/png");
+            else if (ext == ".gif")  res.set_header("Content-Type", "image/gif");
+            else if (ext == ".pdf")  res.set_header("Content-Type", "application/pdf");
+            else if (ext == ".docx") res.set_header("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+            else if (ext == ".doc")  res.set_header("Content-Type", "application/msword");
+            else if (ext == ".xlsx") res.set_header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+            else if (ext == ".txt")  res.set_header("Content-Type", "text/plain; charset=utf-8");
+            else res.set_header("Content-Type", "application/octet-stream");
+
+            res.set_header("Accept-Ranges", "bytes");
+            // RFC 5987: 用 filename*=UTF-8''... 编码非 ASCII 文件名，兼容代理转发
+            std::string encodedName = urlEncodeFilename(filename);
+            res.set_header("Content-Disposition", "attachment; filename=\"" + encodedName + "\"; filename*=UTF-8''" + encodedName);
+            return res;
+        });
+
         
+    // Serve index.html for root route (SPA entry point)
+    CROW_ROUTE(app, "/")
+        .methods("GET"_method)([]() {
+            std::string indexPath = "/home/dpfs/github/dpfsserver/app/server/static/index.html";
+            std::ifstream file(indexPath, std::ios::binary);
+            if (!file.is_open()) {
+                return crow::response(404, "Frontend not deployed");
+            }
+            std::string content((std::istreambuf_iterator<char>(file)),
+                                std::istreambuf_iterator<char>());
+            auto res = crow::response(content);
+            res.set_header("Content-Type", "text/html");
+            return res;
+        });
+
+    // Serve other static root files (favicon, manifest, robots.txt, etc.)
+    CROW_ROUTE(app, "/<string>")
+        .methods("GET"_method)([](std::string filename) {
+            // Don't intercept API routes
+            if (filename.find("api") == 0) return crow::response(404);
+            std::string filePath = "/home/dpfs/github/dpfsserver/app/server/static/" + filename;
+            std::ifstream file(filePath, std::ios::binary);
+            if (!file.is_open()) {
+                // Fallback to index.html for SPA client-side routing
+                std::string indexPath = "/home/dpfs/github/dpfsserver/app/server/static/index.html";
+                std::ifstream indexFile(indexPath, std::ios::binary);
+                if (!indexFile.is_open()) {
+                    return crow::response(404, "File not found");
+                }
+                std::string content((std::istreambuf_iterator<char>(indexFile)),
+                                    std::istreambuf_iterator<char>());
+                auto res = crow::response(content);
+                res.set_header("Content-Type", "text/html");
+                return res;
+            }
+            std::string content((std::istreambuf_iterator<char>(file)),
+                                std::istreambuf_iterator<char>());
+            std::string contentType = "application/octet-stream";
+            if (filename.find(".png") != std::string::npos) contentType = "image/png";
+            else if (filename.find(".ico") != std::string::npos) contentType = "image/x-icon";
+            else if (filename.find(".json") != std::string::npos) contentType = "application/json";
+            auto res = crow::response(content);
+            res.set_header("Content-Type", contentType);
+            return res;
+        });
+
     app.port(20510).multithreaded().run();
 
     return 0;

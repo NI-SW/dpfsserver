@@ -668,3 +668,189 @@ message                   | String                            | 状态信息
   "message": "User info updated successfully"
 }
 ```
+
+---
+
+# 文件上传
+
+## URL
+```
+/api/upload
+```
+## METHOD
+```
+POST
+```
+## 描述
+上传文件到服务器本地文件系统，用于在"商品录入"页面的"扩展数据项"中关联大文件（视频、文档等）。
+
+文件保存路径: `/home/dpfs/github/dpfsserver/uploads/<schema>/<product_name>/<filename>`
+
+上传完成后返回的 `file_path` 可直接填入 base_info 的 value 字段，作为产品扩展数据存入 dpfs。
+
+## Request
+| parameter     | type   | describe |
+|---------------|--------|----------|
+| user_token    | Number | 登录令牌 |
+| schema        | String | 溯源组标识 |
+| product_name  | String | 产品名称 |
+| file_name     | String | 原始文件名 |
+| file_content  | String | 文件内容的 Base64 编码字符串 |
+
+## Response
+| parameter  | type   | describe |
+|------------|--------|----------|
+| code       | Number | 200 表示成功 |
+| message    | String | 状态信息 |
+| file_path  | String | 文件在服务器的绝对路径 |
+
+## 示例请求
+```
+{
+  "user_token": 1,
+  "schema": "FOOD",
+  "product_name": "烧烤酱",
+  "file_name": "production_video.mp4",
+  "file_content": "AAAAIGZ0eXBpc29tAAACAG..."
+}
+```
+## 示例响应
+```
+{
+  "code": 200,
+  "message": "File uploaded successfully",
+  "file_path": "/home/dpfs/github/dpfsserver/uploads/FOOD/烧烤酱/production_video.mp4"
+}
+```
+## 前端交互
+在"商品录入"页面 (Dashboard) 的"扩展数据项"区域，每条 key-value 行的"内容"输入框右侧有一个上传按钮（Upload 图标）。点击后弹出文件选择器，选中文件后自动上传，上传完成后将返回的 `file_path` 自动填入"内容"文本框。
+
+## 注意事项
+- 大文件通过 Base64 编码在 JSON body 中传输，单次请求不宜超过 **200MB**
+- 上传前需先填写"扫描模式"(schema) 和"商品全称"(product_name)，否则提示"请先填写模式和产品名称"
+- 上传按钮在上传过程中显示旋转动画，不可重复点击
+
+---
+
+# 文件列表查询
+
+## URL
+```
+/api/list_files
+```
+## METHOD
+```
+POST
+```
+## 描述
+查询指定产品下所有已上传的文件列表。扫描逻辑分两步:
+1. 扫描 `uploads/<schema>/<product_name>/` 目录下的文件
+2. 额外从产品的 SPXXB 表 base_info 中提取引用的 `uploads/` 路径（解决 productName 变更导致文件目录名不匹配的问题）
+
+两步结果合并去重后返回。
+
+## Request
+| parameter     | type   | describe |
+|---------------|--------|----------|
+| user_token    | Number | 登录令牌 |
+| schema        | String | 溯源组标识 |
+| product_name  | String | 产品名称 |
+
+## Response
+| parameter  | type          | describe |
+|------------|---------------|----------|
+| code       | Number        | 200 表示成功 |
+| message    | String        | "OK" 或 "No files found" |
+| files      | Array[Object] | 文件列表，每项含 name/path/size |
+
+**file 对象结构:**
+| key  | type   | describe |
+|------|--------|----------|
+| name | String | 文件名 |
+| path | String | 服务器绝对路径 |
+| size | Number | 文件大小（字节） |
+
+## 示例请求
+```
+{
+  "user_token": 1,
+  "schema": "FOOD",
+  "product_name": "烧烤酱"
+}
+```
+## 示例响应
+```
+{
+  "code": 200,
+  "message": "OK",
+  "files": [
+    {"name": "production_video.mp4", "path": "/home/dpfs/.../production_video.mp4", "size": 5700},
+    {"name": "quality_report.pdf",   "path": "/home/dpfs/.../quality_report.pdf",   "size": 509}
+  ]
+}
+```
+## 前端交互
+在"系统溯源数据查询"页面的每个产品卡片上有一个"查看文件"按钮（Eye 图标）。点击后弹出文件列表弹窗，展示:
+- 文件类型图标（视频 / 图片 / 文档）
+- 文件名、大小
+- 点击文件可预览（视频播放/图片显示），或点击下载按钮
+
+---
+
+# 文件下载/预览
+
+## URL
+```
+/api/serve_file
+```
+## METHOD
+```
+GET
+```
+## 描述
+提供文件内容的 HTTP 访问，支持浏览器直接播放视频、显示图片或触发下载。
+
+根据文件扩展名自动设置正确的 Content-Type:
+- `.mp4/.webm/.avi/.mov` → video/*
+- `.jpg/.png/.gif` → image/*
+- `.pdf` → application/pdf
+- `.docx` → application/vnd.openxmlformats-officedocument.*
+- 其他 → application/octet-stream
+
+响应头包含:
+- `Content-Disposition: attachment; filename="..."; filename*=UTF-8''...`（RFC 5987 编码，兼容代理转发中文文件名）
+- `Accept-Ranges: bytes`（支持断点续传/视频拖动）
+
+## Request
+| parameter | type   | describe |
+|-----------|--------|----------|
+| path      | String (Query) | 文件绝对路径（URL-encoded） |
+
+## 安全检查
+- 仅允许访问 `/home/dpfs/github/dpfsserver/uploads/` 前缀的路径
+- 拒绝包含 `..` 的路径（防路径遍历）
+- 不存在的文件返回 404
+
+## 示例请求
+```
+GET /api/serve_file?path=%2Fhome%2Fdpfs%2Fgithub%2Fdpfsserver%2Fuploads%2FFOOD%2F%E7%83%A7%E7%83%A4%E9%85%B1%2Fproduction_video.mp4
+```
+## 示例响应
+```
+HTTP/1.1 200 OK
+Content-Type: video/mp4
+Content-Disposition: attachment; filename="...mp4"; filename*=UTF-8''...mp4
+Accept-Ranges: bytes
+Content-Length: 5700
+
+<binary file content>
+```
+## 前端交互
+文件列表弹窗中:
+- **视频文件**: 内嵌 `<video>` 播放器，支持 controls/autoplay
+- **图片文件**: `<img>` 直接显示
+- **下载**: 使用 `fetch` + `Blob` + `URL.createObjectURL` 方式触发浏览器下载（兼容 webpack-dev-server proxy，避免 `<a download>` 兼容性问题）
+
+## 注意事项
+- 文件名包含中文时使用 RFC 5987 `filename*=UTF-8''` 编码，避免经过 HTTP 代理（如 webpack-dev-server）时出现乱码
+- 下载功能使用 JavaScript `fetch` + `Blob` 方式而非 `<a download>`，确保在开发环境（port 3000 proxy）和生产环境（port 20510 直连）下均可正常下载

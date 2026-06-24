@@ -81,6 +81,18 @@ public:
     int updatePassword(const std::string& request, std::string& response);
     int updateUserInfo(const std::string& request, std::string& response);
 
+    // 用户注册（无需登录）
+    int registerUser(const std::string& request, std::string& response);
+
+    // 文件上传：保存到 <项目路径>/uploads/<schema>/<product_name>/<filename>
+    int uploadFile(const std::string& request, std::string& response);
+
+    // 列出产品下所有已上传文件
+    int listFiles(const std::string& request, std::string& response);
+
+    // 读取文件内容（用于前端播放/下载）
+    int serveFile(const std::string& request, std::string& response);
+
 private:
 
     // <user_token, UserSession>
