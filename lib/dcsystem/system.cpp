@@ -15,7 +15,8 @@
 #include <dirent.h>
 #include <set>
 #include <functional>
-
+#include <chrono>
+#include <sys/statvfs.h>
 #include "rapidjson/prettywriter.h"
 
 #define __SERVER_DEBUG__
@@ -1500,6 +1501,10 @@ int CSystem::traceBack(const std::string& request, std::string& response) {
     retDoc.Accept(writer);
     response = buffer.GetString();
 
+    // 审计日志
+    writeAuditLog(session->uid, session->username, session->role,
+                  "trace", "/api/trace_back", "", "success");
+
     return 0;
 }
 
@@ -1772,8 +1777,12 @@ int CSystem::makeTrade(const std::string& request, std::string& response) {
     if (rc != 0) {
         cout << "Make trade failed, error code: " << rc << endl;
         cout << "Error message: " << client.msg << endl;
+        writeAuditLog(session->uid, session->username, session->role,
+                      "create", "/api/make_trade", "", "failure", client.msg);
         genResponseReturn(400, client.msg, response);
     } else {
+        writeAuditLog(session->uid, session->username, session->role,
+                      "create", "/api/make_trade", "", "success");
         genResponseReturn(200, client.msg, response);
     }
     
@@ -2767,6 +2776,256 @@ int CSystem::listFiles(const std::string& request, std::string& response) {
     msg.SetString(msgText.c_str(), allocator);
     retDoc.AddMember("message", msg, allocator);
     retDoc.AddMember("files", filesArr, allocator);
+
+    rapidjson::StringBuffer buffer;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+    retDoc.Accept(writer);
+    response = buffer.GetString();
+    return 0;
+}
+
+// ============================================================================
+// monitor — 系统监控数据采集（无需特殊权限，所有登录用户可查看）
+// 返回: 总产品数、风险产品数、每分钟溯源查询次数、系统响应时间、系统报错数、系统负载
+// ============================================================================
+int CSystem::monitor(const std::string& request, std::string& response) {
+    int rc = 0;
+    rapidjson::Document doc;
+    doc.Parse(request.c_str());
+    if (doc.HasParseError()) {
+        genResponseReturn(400, std::string(rapidjson::GetParseError_En(doc.GetParseError())), response);
+        return 400;
+    }
+    if (!doc.IsObject()) {
+        genResponseReturn(400, "Root must be a JSON object", response);
+        return 400;
+    }
+
+    rc = checkJsonFormat(doc, "user_token", jsonFieldType::IsInt64, response);
+    if (rc != 0) return rc;
+
+    int64_t user_token = doc["user_token"].GetInt64();
+    UserSession* session = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(user_tokens_mutex);
+        auto it = user_tokens.find(user_token);
+        if (it == user_tokens.end()) {
+            genResponseReturn(401, "Invalid user token", response);
+            return 401;
+        }
+        session = it->second.get();
+    }
+
+    rapidjson::Document retDoc;
+    retDoc.SetObject();
+    rapidjson::Document::AllocatorType& allocator = retDoc.GetAllocator();
+
+    // --- 1. 总产品数 & 2. 风险产品数 (从 dpfs 后端查询) ---
+    int64_t totalProducts = 0;
+    int64_t riskProducts = 0;
+
+    if (session && session->client) {
+        CGrpcCli& client = *session->client;
+        // 查询 SYSTRACEABLES 获取总产品数
+        rc = client.getTableHandle("SYSDPFS", "SYSTRACEABLES");
+        if (rc == 0) {
+            std::vector<std::string> idxCol;
+            idxCol.emplace_back();
+            idxCol[0].resize(8);
+            int64_t begin = 0;
+            memcpy(const_cast<char*>(idxCol[0].data()), &begin, sizeof(begin));
+            IDXHANDLE hidx = 0;
+            rc = client.getIdxIter({"TID"}, idxCol, hidx);
+            if (rc == 0) {
+                while (client.fetchNextRow(hidx) == 0) {
+                    totalProducts++;
+                }
+                client.releaseIdxIter(hidx);
+            }
+            client.releaseTableHandle();
+        }
+        // 查询 SYSRISKWARNS 获取风险产品数
+        rc = client.getTableHandle("SYSDPFS", "SYSRISKWARNS");
+        if (rc == 0) {
+            std::vector<std::string> idxCol2;
+            idxCol2.emplace_back();
+            idxCol2[0].resize(8);
+            int64_t begin2 = 0;
+            memcpy(const_cast<char*>(idxCol2[0].data()), &begin2, sizeof(begin2));
+            IDXHANDLE hidx2 = 0;
+            rc = client.getIdxIter({"TID"}, idxCol2, hidx2);
+            if (rc == 0) {
+                while (client.fetchNextRow(hidx2) == 0) {
+                    riskProducts++;
+                }
+                client.releaseIdxIter(hidx2);
+            }
+            client.releaseTableHandle();
+        }
+    }
+
+    // --- 3. 每分钟溯源查询次数 & 5. 系统报错数 & 交易统计 (从 MySQL audit_logs 查询) ---
+    int64_t traceCountPerMin = 0;
+    int64_t errorCount = 0;
+    int64_t tradeCountPerMin = 0;
+
+    {
+        SQLHENV env = SQL_NULL_HANDLE;
+        SQLHDBC dbc = SQL_NULL_HANDLE;
+        SQLHSTMT stmt = SQL_NULL_HANDLE;
+        SQLRETURN ret;
+
+        ret = SQLAllocHandle(SQL_HANDLE_ENV, SQL_NULL_HANDLE, &env);
+        if (ret == SQL_SUCCESS || ret == SQL_SUCCESS_WITH_INFO) {
+            SQLSetEnvAttr(env, SQL_ATTR_ODBC_VERSION, (SQLPOINTER)SQL_OV_ODBC3, 0);
+            ret = SQLAllocHandle(SQL_HANDLE_DBC, env, &dbc);
+            if (ret == SQL_SUCCESS || ret == SQL_SUCCESS_WITH_INFO) {
+                std::string connStr = buildOdbcConnStr();
+                ret = SQLDriverConnect(dbc, nullptr, (SQLCHAR*)connStr.c_str(), SQL_NTS,
+                                       nullptr, 0, nullptr, SQL_DRIVER_COMPLETE);
+                if (ret == SQL_SUCCESS || ret == SQL_SUCCESS_WITH_INFO) {
+                    ret = SQLAllocHandle(SQL_HANDLE_STMT, dbc, &stmt);
+                    if (ret == SQL_SUCCESS || ret == SQL_SUCCESS_WITH_INFO) {
+                        // 每分钟溯源查询次数
+                        std::string sql1 = "SELECT COUNT(*) FROM audit_logs WHERE resource='/api/trace_back' AND created_at >= DATE_SUB(NOW(), INTERVAL 1 MINUTE)";
+                        if (SQLExecDirect(stmt, (SQLCHAR*)sql1.c_str(), SQL_NTS) == SQL_SUCCESS) {
+                            if (SQLFetch(stmt) == SQL_SUCCESS) {
+                                char buf[64] = {0};
+                                SQLGetData(stmt, 1, SQL_C_CHAR, buf, sizeof(buf), nullptr);
+                                traceCountPerMin = strtoll(buf, nullptr, 10);
+                            }
+                        }
+                        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+
+                        // 系统报错数（最近1小时内失败的操作数）
+                        ret = SQLAllocHandle(SQL_HANDLE_STMT, dbc, &stmt);
+                        if (ret == SQL_SUCCESS || ret == SQL_SUCCESS_WITH_INFO) {
+                            std::string sql2 = "SELECT COUNT(*) FROM audit_logs WHERE result='failure' AND created_at >= DATE_SUB(NOW(), INTERVAL 1 HOUR)";
+                            if (SQLExecDirect(stmt, (SQLCHAR*)sql2.c_str(), SQL_NTS) == SQL_SUCCESS) {
+                                if (SQLFetch(stmt) == SQL_SUCCESS) {
+                                    char buf2[64] = {0};
+                                    SQLGetData(stmt, 1, SQL_C_CHAR, buf2, sizeof(buf2), nullptr);
+                                    errorCount = strtoll(buf2, nullptr, 10);
+                                }
+                            }
+                            SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+                        }
+
+                        // 每分钟交易次数
+                        ret = SQLAllocHandle(SQL_HANDLE_STMT, dbc, &stmt);
+                        if (ret == SQL_SUCCESS || ret == SQL_SUCCESS_WITH_INFO) {
+                            std::string sql3 = "SELECT COUNT(*) FROM audit_logs WHERE resource='/api/make_trade' AND created_at >= DATE_SUB(NOW(), INTERVAL 1 MINUTE)";
+                            if (SQLExecDirect(stmt, (SQLCHAR*)sql3.c_str(), SQL_NTS) == SQL_SUCCESS) {
+                                if (SQLFetch(stmt) == SQL_SUCCESS) {
+                                    char buf3[64] = {0};
+                                    SQLGetData(stmt, 1, SQL_C_CHAR, buf3, sizeof(buf3), nullptr);
+                                    tradeCountPerMin = strtoll(buf3, nullptr, 10);
+                                }
+                            }
+                            SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+                        }
+                    }
+                    SQLDisconnect(dbc);
+                }
+                SQLFreeHandle(SQL_HANDLE_DBC, dbc);
+            }
+            SQLFreeHandle(SQL_HANDLE_ENV, env);
+        }
+    }
+
+    // --- 4. 系统响应时间 (测量 dpfs 后端连通性) ---
+    double responseTimeMs = 0.0;
+    {
+        auto tStart = std::chrono::steady_clock::now();
+        // 简单 ping: 尝试 getTableHandle + releaseTableHandle
+        if (session && session->client) {
+            CGrpcCli& client = *session->client;
+            rc = client.getTableHandle("SYSDPFS", "SYSTRACEABLES");
+            if (rc == 0) {
+                client.releaseTableHandle();
+            }
+        }
+        auto tEnd = std::chrono::steady_clock::now();
+        responseTimeMs = std::chrono::duration<double, std::milli>(tEnd - tStart).count();
+    }
+
+    // --- 6. 系统负载 (CPU、内存、存储) ---
+    double cpuUsage = 0.0;
+    int64_t memTotalKB = 0, memAvailableKB = 0;
+    double memUsagePercent = 0.0;
+    int64_t diskTotalKB = 0, diskUsedKB = 0;
+    double diskUsagePercent = 0.0;
+
+    // CPU 使用率 (从 /proc/stat 读取)
+    {
+        std::ifstream statFile("/proc/stat");
+        std::string line;
+        if (std::getline(statFile, line)) {
+            unsigned long long user, nice, system, idle, iowait, irq, softirq, steal;
+            if (sscanf(line.c_str(), "cpu %llu %llu %llu %llu %llu %llu %llu %llu",
+                       &user, &nice, &system, &idle, &iowait, &irq, &softirq, &steal) == 8) {
+                unsigned long long total = user + nice + system + idle + iowait + irq + softirq + steal;
+                unsigned long long busy = total - idle - iowait;
+                if (total > 0) cpuUsage = (double)busy / total * 100.0;
+            }
+        }
+    }
+
+    // 内存信息 (从 /proc/meminfo 读取)
+    {
+        std::ifstream memFile("/proc/meminfo");
+        std::string line;
+        while (std::getline(memFile, line)) {
+            if (line.find("MemTotal:") == 0) {
+                sscanf(line.c_str(), "MemTotal: %lld kB", &memTotalKB);
+            } else if (line.find("MemAvailable:") == 0) {
+                sscanf(line.c_str(), "MemAvailable: %lld kB", &memAvailableKB);
+            }
+            if (memTotalKB > 0 && memAvailableKB > 0) break;
+        }
+        if (memTotalKB > 0) {
+            memUsagePercent = (double)(memTotalKB - memAvailableKB) / memTotalKB * 100.0;
+        }
+    }
+
+    // 磁盘使用率 (使用 statvfs 获取项目所在分区的使用情况)
+    {
+        struct statvfs vfs;
+        if (statvfs("/home/dpfs", &vfs) == 0) {
+            diskTotalKB = (int64_t)vfs.f_blocks * vfs.f_frsize / 1024;
+            diskUsedKB = (int64_t)(vfs.f_blocks - vfs.f_bfree) * vfs.f_frsize / 1024;
+            if (diskTotalKB > 0) {
+                diskUsagePercent = (double)diskUsedKB / diskTotalKB * 100.0;
+            }
+        }
+    }
+
+    // --- 构建返回 JSON ---
+    retDoc.AddMember("code", 200, allocator);
+    rapidjson::Value msg;
+    msg.SetString("OK", allocator);
+    retDoc.AddMember("message", msg, allocator);
+
+    retDoc.AddMember("total_products", totalProducts, allocator);
+    retDoc.AddMember("risk_products", riskProducts, allocator);
+    retDoc.AddMember("trace_count_per_min", traceCountPerMin, allocator);
+    retDoc.AddMember("trade_count_per_min", tradeCountPerMin, allocator);
+    retDoc.AddMember("response_time_ms", responseTimeMs, allocator);
+    retDoc.AddMember("error_count", errorCount, allocator);
+
+    retDoc.AddMember("cpu_usage", cpuUsage, allocator);
+    retDoc.AddMember("mem_total_kb", memTotalKB, allocator);
+    retDoc.AddMember("mem_available_kb", memAvailableKB, allocator);
+    retDoc.AddMember("mem_usage_percent", memUsagePercent, allocator);
+    retDoc.AddMember("disk_total_kb", diskTotalKB, allocator);
+    retDoc.AddMember("disk_used_kb", diskUsedKB, allocator);
+    retDoc.AddMember("disk_usage_percent", diskUsagePercent, allocator);
+
+    // 当前活跃用户数
+    {
+        std::lock_guard<std::mutex> lk(user_tokens_mutex);
+        retDoc.AddMember("active_users", (int64_t)user_tokens.size(), allocator);
+    }
 
     rapidjson::StringBuffer buffer;
     rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);

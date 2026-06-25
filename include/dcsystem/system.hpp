@@ -93,6 +93,9 @@ public:
     // 读取文件内容（用于前端播放/下载）
     int serveFile(const std::string& request, std::string& response);
 
+    // 系统监控：总产品数、风险产品数、每分钟溯源查询次数、系统响应时间、系统报错、系统负载
+    int monitor(const std::string& request, std::string& response);
+
 private:
 
     // <user_token, UserSession>

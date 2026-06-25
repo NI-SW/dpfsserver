@@ -256,6 +256,19 @@ int main(int argc, char* argv[]) {
             return res;
         });
 
+#define __MONITOR_API__
+    CROW_ROUTE(app, "/api/monitor")
+        .methods("POST"_method)([](const crow::request& req) {
+            int rc = 0;
+            std::string msg = "";
+            rc = sys.monitor(req.body, msg);
+            if (rc != 0) {
+                return crow::response(rc, msg);
+            }
+            auto res = crow::response(200, msg);
+            return res;
+        });
+
     // 提供文件访问：GET /api/serve_file?path=...
     CROW_ROUTE(app, "/api/serve_file")
         .methods("GET"_method)([](const crow::request& req) {
