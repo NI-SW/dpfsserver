@@ -5,6 +5,10 @@
 #include <rapidjson/stringbuffer.h>
 #include <deepseek/deepseek.hpp>
 #include <fstream>
+#include <log/logbinary.h>
+
+// 全局日志实例
+extern logrecord* dlog;
 #include <sstream>
 #include <sql.h>
 #include <sqlext.h>
@@ -46,6 +50,9 @@ std::string g_mysqlDatabase = "dpfs";
 std::string g_aiPromptTemplate = "";
 std::string g_aiPromptTemplate4trace = "";
 
+// 全局日志实例
+logrecord* dlog = nullptr;
+
 CSystem::CSystem() {
 
 }
@@ -65,6 +72,13 @@ int CSystem::init(const initSystemInfo& initInfo) {
     g_mysqlUser     = initInfo.mysqlUser;
     g_mysqlPasswd   = initInfo.mysqlPasswd;
     g_mysqlDatabase = initInfo.mysqlDatabase;
+
+    // 初始化日志模块
+    if (!dlog) {
+        dlog = new logrecord();
+    }
+    dlog->set_log_path("/home/dpfs/github/dpfsserver/app/server/dserver.log");
+    dlog->set_loglevel(logrecord::LOG_INFO);
 
     std::fstream promptFile("prompt", std::ios::in);
     if (!promptFile.is_open()) {
@@ -186,6 +200,7 @@ static int loadRolePermissions(const std::string& role, std::unordered_set<std::
                            nullptr, 0, nullptr, SQL_DRIVER_COMPLETE);
     if (ret != SQL_SUCCESS && ret != SQL_SUCCESS_WITH_INFO) {
         cerr << "ODBC connect error in loadRolePermissions" << endl;
+        dlog->log_error("ODBC connect error in loadRolePermissions\n");
         SQLFreeHandle(SQL_HANDLE_DBC, dbc); SQLFreeHandle(SQL_HANDLE_ENV, env); return -EIO;
     }
 
@@ -282,6 +297,16 @@ int CSystem::login(const std::string& request, std::string& response) {
     std::string username = doc["username"].GetString();
     std::string password = doc["password"].GetString();
 
+    // 输入长度上限校验 (防止超长字符串传递至 MySQL/dpfs 导致崩溃)
+    if (username.length() > 64) {
+        genResponseReturn(400, "Username too long (max 64 characters)", response);
+        return 400;
+    }
+    if (password.length() > 128) {
+        genResponseReturn(400, "Password too long (max 128 characters)", response);
+        return 400;
+    }
+
     // ─── 1. MySQL 验证（ODBC） ───
     int64_t dbUid = 0;
     std::string dbRole;
@@ -318,13 +343,14 @@ int CSystem::login(const std::string& request, std::string& response) {
                                 dbRole   = std::string(colRole);
                                 dbPasswd = std::string(colPasswd);
                                 dbStatus = std::string(colStatus);
-                            } else {
-                                SQLFreeHandle(SQL_HANDLE_STMT, stmt);
-                                SQLDisconnect(dbc);
-                                SQLFreeHandle(SQL_HANDLE_DBC, dbc);
-                                SQLFreeHandle(SQL_HANDLE_ENV, env);
-                                genResponseReturn(403, "Invalid username or password", response);
-                                return 403;
+                        } else {
+                            SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+                            SQLDisconnect(dbc);
+                            SQLFreeHandle(SQL_HANDLE_DBC, dbc);
+                            SQLFreeHandle(SQL_HANDLE_ENV, env);
+                            dlog->log_notic("[WARN] Login failed: user '%s' not found\n", username.c_str());
+                            genResponseReturn(403, "Invalid username or password", response);
+                            return 403;
                             }
                         }
                         SQLFreeHandle(SQL_HANDLE_STMT, stmt);
@@ -337,6 +363,7 @@ int CSystem::login(const std::string& request, std::string& response) {
         }
         if (dbStatus.empty()) {
             cerr << "ODBC login query error" << endl;
+            dlog->log_error("ODBC login query error\n");
             genResponseReturn(500, "Database error", response);
             return 500;
         }
@@ -344,6 +371,7 @@ int CSystem::login(const std::string& request, std::string& response) {
 
     // 校验密码
     if (dbPasswd != password) {
+        dlog->log_notic("[WARN] Login failed: invalid password for user '%s'\n", username.c_str());
         writeAuditLog(dbUid, username, dbRole, "login", "/api/login", "",
                       "failure", "Invalid password");
         genResponseReturn(403, "Invalid username or password", response);
@@ -352,6 +380,7 @@ int CSystem::login(const std::string& request, std::string& response) {
 
     // 校验账户状态
     if (dbStatus == "disabled" || dbStatus == "locked") {
+        dlog->log_notic("[WARN] Login failed: account '%s' is %s\n", username.c_str(), dbStatus.c_str());
         writeAuditLog(dbUid, username, dbRole, "login", "/api/login", "",
                       "failure", "Account is " + dbStatus);
         genResponseReturn(403, "Account is " + dbStatus, response);
@@ -373,6 +402,7 @@ int CSystem::login(const std::string& request, std::string& response) {
     auto channel = grpc::CreateChannel(g_connStr, grpc::InsecureChannelCredentials());
     if (channel == nullptr) {
         cerr << "Failed to create gRPC channel" << endl;
+        dlog->log_error("Failed to create gRPC channel\n");
         genResponseReturn(500, "Connect to db error", response);
         return 500;
     }
@@ -389,6 +419,7 @@ int CSystem::login(const std::string& request, std::string& response) {
     rc = client.login("root", "root");
     if (rc != 0) {
         cout << "DPFS login failed for user: " << username << ", error code: " << rc << endl;
+        dlog->log_error("DPFS login failed for user: %s, error code: %d\n", username.c_str(), rc);
         cout << "Error message: \n" << client.msg << endl;
         // 移除失败的 session
         this->user_tokens_mutex.lock();
@@ -398,6 +429,7 @@ int CSystem::login(const std::string& request, std::string& response) {
         return 500;
     }
     cout << "Login successful for user: " << username << " (role: " << dbRole << ")" << endl;
+    dlog->log_inf("Login successful: %s (role: %s)\n", username.c_str(), dbRole.c_str());
 
     // ─── 4. 更新最后登录时间（ODBC） ───
     {
@@ -563,6 +595,20 @@ trace_pros                | Array of Objects                   | 溯源结构列
 
     int64_t begin = doc["begin"].GetInt64();
     int64_t limit = doc["limit"].GetInt64();
+
+    // 边界校验
+    if (begin < 0) {
+        genResponseReturn(400, "begin must be >= 0", response);
+        return 400;
+    }
+    if (begin > 10000000) {
+        genResponseReturn(400, "begin too large (max 10000000)", response);
+        return 400;
+    }
+    if (limit < 1 || limit > 1000) {
+        genResponseReturn(400, "limit must be between 1 and 1000", response);
+        return 400;
+    }
 
     rc = client.getTableHandle("SYSDPFS", "SYSTRACEABLES"); 
     if (rc != 0) {
@@ -759,6 +805,7 @@ int CSystem::dropTracablePro(const std::string& request, std::string& response) 
     rc = client.DropTracablePro(schema, product_name);
     if (rc != 0) {
         cout << "DropTracablePro failed, error code: " << rc << endl;
+        dlog->log_error("DropTracablePro failed, error code: %d\n", rc);
         cout << "Error message: " << client.msg << endl;
         writeAuditLog(session->uid, session->username, session->role,
                       "delete", "/api/drop_tracable_pro", "",
@@ -808,6 +855,16 @@ int CSystem::risk(const std::string& request, std::string& response) {
     std::string schema = doc["schema"].GetString();
     std::string product_name = doc["product_name"].GetString();
 
+    // 输入长度上限校验 (防止超长字符串传入 dpfs 后端导致 GPF 崩溃)
+    if (schema.length() > 128) {
+        genResponseReturn(400, "schema too long (max 128 characters)", response);
+        return 400;
+    }
+    if (product_name.length() > 256) {
+        genResponseReturn(400, "product_name too long (max 256 characters)", response);
+        return 400;
+    }
+
     UserSession* session = nullptr;
     rc = checkTokenAndPermission(doc["user_token"].GetInt64(), "product:risk:create", session);
     if (rc != 0) {
@@ -821,6 +878,12 @@ int CSystem::risk(const std::string& request, std::string& response) {
     for (const auto& item : doc["ingredients"].GetArray()) {
         if (!item.IsArray() || item.Size() != 2 || !item[0].IsString() || !item[1].IsString()) {
             genResponseReturn(400, "Invalid 'ingredients' field, must be an array of (string, string) pairs", response);
+
+        // ingredient name length check
+        if (strlen(item[0].GetString()) > 256) {
+            genResponseReturn(400, "Ingredient name too long (max 256 characters)", response);
+            return 400;
+        }
             return 400;
         }
 
@@ -841,7 +904,14 @@ int CSystem::risk(const std::string& request, std::string& response) {
         base_info[item[0].GetString()] = item[1].GetString();
     }
     int risk_report = doc["risk_report"].GetInt();
-    size_t product_number = doc["product_number"].GetInt64();
+    int64_t raw_product_number = doc["product_number"].GetInt64();
+
+    // product_number 边界校验 (先按 signed 检查，防止负数溢出为巨大正数)
+    if (raw_product_number <= 0) {
+        genResponseReturn(400, "product_number must be greater than 0", response);
+        return 400;
+    }
+    size_t product_number = static_cast<size_t>(raw_product_number);
     std::string trace_code_prefix;
     rc = client.createTracablePro(
         schema,
@@ -1217,6 +1287,11 @@ int CSystem::traceBack(const std::string& request, std::string& response) {
     rc = checkJsonFormat(doc, "ingre_detail", jsonFieldType::IsInt64, response); if (rc == 0) { ingDet = doc["ingre_detail"].GetInt64(); }
     rc = checkJsonFormat(doc, "ai_risk", jsonFieldType::IsInt64, response); if (rc == 0) { aiRisk = doc["ai_risk"].GetInt64(); }
 
+    // 将负值标志位转换为 0 (dpfs 不支持负值)
+    if (trace_defail < 0) trace_defail = 0;
+    if (ingDet < 0) ingDet = 0;
+    if (aiRisk < 0) aiRisk = 0;
+
     rapidjson::Document tDoc;
     tDoc.SetObject();
 
@@ -1235,7 +1310,13 @@ int CSystem::traceBack(const std::string& request, std::string& response) {
     }
     CGrpcCli& client = *session->client;
 
-    std::string tc = hex2Binary(doc["trace_code"].GetString());
+    // 早期长度检查：trace_code 在 hex2Binary 之前先验证长度，防止超长输入导致缓冲区溢出
+    const char* traceCodeStr = doc["trace_code"].GetString();
+    if (strlen(traceCodeStr) > 1024) {
+        genResponseReturn(400, "Invalid trace code, too long", response);
+        return 400;
+    }
+    std::string tc = hex2Binary(traceCodeStr);
     if (tc.size() != 20) {
         genResponseReturn(400, "Invalid trace code, must be 40 hex characters representing 20 bytes", response);
         return 400;
@@ -1266,9 +1347,10 @@ int CSystem::traceBack(const std::string& request, std::string& response) {
     for (const auto& [key, value] : tresult.base_info) {
         if (memcmp(key.c_str(), "ctime", 5) == 0) {
             time_t timestamp = std::stoll(value);
-            struct tm* timeinfo = localtime(&timestamp);
+            struct tm timeinfo;
+            localtime_r(&timestamp, &timeinfo);
             char buffer[80];
-            strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", timeinfo);
+            strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &timeinfo);
             traceBaseResult += key + ": " + std::string(buffer) + "\n";
             tDoc.AddMember(rapidjson::Value(key.c_str(), tDoc.GetAllocator()), rapidjson::Value(buffer, tDoc.GetAllocator()), tDoc.GetAllocator());
             continue;
@@ -1760,6 +1842,18 @@ int CSystem::makeTrade(const std::string& request, std::string& response) {
     if (logisticsInfo == "")    { genResponseReturn(400, "Invalid Param", response); return 400; };
     if (otherInfo == "")        { genResponseReturn(400, "Invalid Param", response); return 400; };
     if (tradePrice == "")       { genResponseReturn(400, "Invalid Param", response); return 400; };
+
+    // 字段长度上限校验 (防止超长字符串传入 dpfs 后端)
+    if (buyer.length() > 512)           { genResponseReturn(400, "buyer too long (max 512)", response); return 400; }
+    if (buyerAddr.length() > 512)       { genResponseReturn(400, "buyer_addr too long (max 512)", response); return 400; }
+    if (buyerPhone.length() > 32)       { genResponseReturn(400, "buyer_phone too long (max 32)", response); return 400; }
+    if (seller.length() > 512)          { genResponseReturn(400, "seller too long (max 512)", response); return 400; }
+    if (sellerAddr.length() > 512)      { genResponseReturn(400, "seller_addr too long (max 512)", response); return 400; }
+    if (sellerPhone.length() > 32)      { genResponseReturn(400, "seller_phone too long (max 32)", response); return 400; }
+    if (logisticsInfo.length() > 512)   { genResponseReturn(400, "logistics_info too long (max 512)", response); return 400; }
+    if (otherInfo.length() > 512)       { genResponseReturn(400, "other_info too long (max 512)", response); return 400; }
+    if (tradePrice.length() > 32)       { genResponseReturn(400, "trade_price too long (max 32)", response); return 400; }
+
     // dpfs product instance IDs start from 0; start_id < 0 causes trade to silently
     // not appear in traceBack results.  Clamp to 0 as a safety net.
     // NOTE: dpfs gRPC server currently ignores start_uid and always binds trades
@@ -1768,6 +1862,7 @@ int CSystem::makeTrade(const std::string& request, std::string& response) {
     if (tradeProductStartID != 0) {
         cout << "[WARN] makeTrade: trade_product_start_id=" << tradeProductStartID
              << " was non-zero, but dpfs only supports instance 0. Clamping to 0." << endl;
+        dlog->log_notic("[WARN] makeTrade: trade_product_start_id=%lld clamped to 0\n", tradeProductStartID);
         tradeProductStartID = 0;
     }
 
@@ -1776,6 +1871,7 @@ int CSystem::makeTrade(const std::string& request, std::string& response) {
     rc = client.makeTrade(tradeSchema, tradeProductName, 999/*deprecated*/, tradeProductStartID, tradeProductNumber, buyer, buyerAddr, buyerPhone, seller, sellerAddr, sellerPhone, logisticsInfo, otherInfo, tradePrice);
     if (rc != 0) {
         cout << "Make trade failed, error code: " << rc << endl;
+        dlog->log_error("Make trade failed, error code: %d\n", rc);
         cout << "Error message: " << client.msg << endl;
         writeAuditLog(session->uid, session->username, session->role,
                       "create", "/api/make_trade", "", "failure", client.msg);
@@ -1851,6 +1947,20 @@ trace_pros                | Array of Objects                   | 溯源结构列
 
     int64_t begin = doc["begin"].GetInt64();
     int64_t limit = doc["limit"].GetInt64();
+
+    // 边界校验
+    if (begin < 0) {
+        genResponseReturn(400, "begin must be >= 0", response);
+        return 400;
+    }
+    if (begin > 10000000) {
+        genResponseReturn(400, "begin too large (max 10000000)", response);
+        return 400;
+    }
+    if (limit < 1 || limit > 1000) {
+        genResponseReturn(400, "limit must be between 1 and 1000", response);
+        return 400;
+    }
 
     rc = client.getTableHandle("SYSDPFS", "SYSRISKWARNS"); 
     if (rc != 0) {
@@ -2120,6 +2230,10 @@ int CSystem::updatePassword(const std::string& request, std::string& response) {
 
     if (newPasswd.length() < 4) {
         genResponseReturn(400, "New password too short (min 4 chars)", response);
+        return 400;
+    }
+    if (newPasswd.length() > 128) {
+        genResponseReturn(400, "New password too long (max 128 chars)", response);
         return 400;
     }
 
@@ -2420,6 +2534,10 @@ int CSystem::registerUser(const std::string& request, std::string& response) {
     // 输入校验
     if (username.empty()) {
         genResponseReturn(400, "Username must not be empty", response);
+    if (username.length() > 64) {
+        genResponseReturn(400, "Username too long (max 64 characters)", response);
+        return 400;
+    }
         return 400;
     }
     if (password.empty()) {
@@ -2428,11 +2546,31 @@ int CSystem::registerUser(const std::string& request, std::string& response) {
     }
     if (password.length() < 6) {
         genResponseReturn(400, "Password must be at least 6 characters", response);
+    if (password.length() > 128) {
+        genResponseReturn(400, "Password too long (max 128 characters)", response);
+        return 400;
+    }
         return 400;
     }
     // 合法角色列表（仅允许消费者和生产商注册）
     if (role != "manufacturer" && role != "consumer") {
         genResponseReturn(400, "Invalid role. Must be one of: consumer, manufacturer", response);
+    if (realName.length() > 128) {
+        genResponseReturn(400, "real_name too long (max 128 characters)", response);
+        return 400;
+    }
+    if (description.length() > 1024) {
+        genResponseReturn(400, "description too long (max 1024 characters)", response);
+        return 400;
+    }
+    if (phone.length() > 32) {
+        genResponseReturn(400, "phone too long (max 32 characters)", response);
+        return 400;
+    }
+    if (mail.length() > 128) {
+        genResponseReturn(400, "mail too long (max 128 characters)", response);
+        return 400;
+    }
         return 400;
     }
 
@@ -2532,6 +2670,7 @@ int CSystem::registerUser(const std::string& request, std::string& response) {
     SQLFreeHandle(SQL_HANDLE_ENV, env);
 
     cout << "User registered: " << username << " (role: " << role << ")" << endl;
+    dlog->log_inf("User registered: %s (role: %s)\n", username.c_str(), role.c_str());
 
     // 审计日志 (uid=0 因为是新用户，尚未登录)
     writeAuditLog(0, username, role, "register", "/api/register", "", "success");
@@ -2593,6 +2732,20 @@ int CSystem::uploadFile(const std::string& request, std::string& response) {
         return 400;
     }
 
+    // 长度上限校验
+    if (schema.length() > 128) {
+        genResponseReturn(400, "schema too long (max 128 characters)", response);
+        return 400;
+    }
+    if (productName.length() > 256) {
+        genResponseReturn(400, "product_name too long (max 256 characters)", response);
+        return 400;
+    }
+    if (fileName.length() > 256) {
+        genResponseReturn(400, "file_name too long (max 256 characters)", response);
+        return 400;
+    }
+
     // 构建目标路径: /home/dpfs/github/dpfsserver/uploads/<schema>/<product_name>/
     std::string baseDir = "/home/dpfs/github/dpfsserver/uploads";
     std::string dirPath = baseDir + "/" + schema + "/" + productName;
@@ -2631,6 +2784,7 @@ int CSystem::uploadFile(const std::string& request, std::string& response) {
     response = buffer.GetString();
 
     std::cout << "[UPLOAD] File saved: " << filePath << " (" << decoded.size() << " bytes)" << std::endl;
+    dlog->log_inf("[UPLOAD] File saved: %s (%zu bytes)\n", filePath.c_str(), decoded.size());
     return 0;
 }
 
@@ -3026,6 +3180,110 @@ int CSystem::monitor(const std::string& request, std::string& response) {
         std::lock_guard<std::mutex> lk(user_tokens_mutex);
         retDoc.AddMember("active_users", (int64_t)user_tokens.size(), allocator);
     }
+
+    rapidjson::StringBuffer buffer;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+    retDoc.Accept(writer);
+    response = buffer.GetString();
+    return 0;
+}
+
+// ============================================================================
+// getLogs — 系统日志：读取 dserver.log 最近 N 行返回给前端
+// 请求: {"user_token":int, "lines":int}  默认返回 50 行
+// 响应: {"code":200, "logs":[{"time":"...","level":"INFO","msg":"..."},...]}
+// ============================================================================
+int CSystem::getLogs(const std::string& request, std::string& response) {
+    int rc = 0;
+    rapidjson::Document doc;
+    doc.Parse(request.c_str());
+    if (doc.HasParseError()) {
+        genResponseReturn(400, std::string(rapidjson::GetParseError_En(doc.GetParseError())), response);
+        return 400;
+    }
+    if (!doc.IsObject()) {
+        genResponseReturn(400, "Root must be a JSON object", response);
+        return 400;
+    }
+
+    rc = checkJsonFormat(doc, "user_token", jsonFieldType::IsInt64, response);
+    if (rc != 0) return rc;
+
+    int64_t user_token = doc["user_token"].GetInt64();
+    {
+        std::lock_guard<std::mutex> lk(user_tokens_mutex);
+        auto it = user_tokens.find(user_token);
+        if (it == user_tokens.end()) {
+            genResponseReturn(401, "Invalid user token", response);
+            return 401;
+        }
+    }
+
+    int maxLines = 50;
+    if (doc.HasMember("lines") && doc["lines"].IsInt()) {
+        maxLines = doc["lines"].GetInt();
+        if (maxLines < 1) maxLines = 1;
+        if (maxLines > 500) maxLines = 500;
+    }
+
+    rapidjson::Document retDoc;
+    retDoc.SetObject();
+    rapidjson::Document::AllocatorType& allocator = retDoc.GetAllocator();
+    rapidjson::Value logsArr(rapidjson::kArrayType);
+
+    std::string logPath = dlog->get_log_path();
+    std::ifstream logFile(logPath);
+    if (logFile.is_open()) {
+        std::vector<std::string> lines;
+        std::string line;
+        while (std::getline(logFile, line)) {
+            if (!line.empty()) lines.push_back(line);
+        }
+        logFile.close();
+
+        int start = (int)lines.size() - maxLines;
+        if (start < 0) start = 0;
+
+        for (int i = start; i < (int)lines.size(); i++) {
+            rapidjson::Value logEntry(rapidjson::kObjectType);
+
+            // 解析格式: [2026-06-25 22:56:07] [INFO ]: message
+            if (lines[i].length() > 33) {
+                std::string timeStr = lines[i].substr(1, 19);
+                std::string levelStr = lines[i].substr(23, 5);
+                std::string msgStr = lines[i].substr(31);
+
+                // trim level trailing spaces
+                while (!levelStr.empty() && levelStr.back() == ' ') levelStr.pop_back();
+                // trim leading ": " from message
+                if (msgStr.length() >= 2 && msgStr[0] == ':' && msgStr[1] == ' ')
+                    msgStr = msgStr.substr(2);
+
+                rapidjson::Value t, l, m;
+                t.SetString(timeStr.c_str(), allocator);
+                l.SetString(levelStr.c_str(), allocator);
+                m.SetString(msgStr.c_str(), allocator);
+                logEntry.AddMember("time", t, allocator);
+                logEntry.AddMember("level", l, allocator);
+                logEntry.AddMember("msg", m, allocator);
+            } else {
+                rapidjson::Value t, l, m;
+                t.SetString("", allocator);
+                l.SetString("RAW", allocator);
+                m.SetString(lines[i].c_str(), allocator);
+                logEntry.AddMember("time", t, allocator);
+                logEntry.AddMember("level", l, allocator);
+                logEntry.AddMember("msg", m, allocator);
+            }
+            logsArr.PushBack(logEntry, allocator);
+        }
+    }
+
+    retDoc.AddMember("code", 200, allocator);
+    rapidjson::Value msg;
+    msg.SetString("OK", allocator);
+    retDoc.AddMember("message", msg, allocator);
+    retDoc.AddMember("logs", logsArr, allocator);
 
     rapidjson::StringBuffer buffer;
     rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);

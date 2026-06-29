@@ -7,6 +7,10 @@
 // #include <DpfsApiDf.hpp>  // temporarily disabled for build
 #include <dpfsclient/grpcclient.hpp>
 #include <basic/dpfsconst.hpp>
+#include <log/logbinary.h>
+
+// 全局日志实例
+extern logrecord* dlog;
 
 struct CRiskInfo {
     std::string riskLevel;
@@ -95,6 +99,9 @@ public:
 
     // 系统监控：总产品数、风险产品数、每分钟溯源查询次数、系统响应时间、系统报错、系统负载
     int monitor(const std::string& request, std::string& response);
+
+    // 系统日志：返回 dserver.log 最近 N 行
+    int getLogs(const std::string& request, std::string& response);
 
 private:
 

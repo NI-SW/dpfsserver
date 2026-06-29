@@ -9,11 +9,13 @@
 #include <rapidjson/writer.h>
 #include <rapidjson/stringbuffer.h>
 #include <dcsystem/system.hpp>
+#include <log/logbinary.h>
 #include <fstream>
 #include <sstream>
 #include <iomanip>
 initSystemInfo initInfo;
-CSystem sys;
+CSystem* sys = nullptr;
+extern logrecord* dlog;
 
 void Args_Error();
 void Analy_Input(int argc, char** argv);
@@ -33,8 +35,8 @@ int main(int argc, char* argv[]) {
 
     Analy_Input(argc, argv);
 
-
-    sys.init(initInfo);
+    sys = new CSystem();
+    sys->init(initInfo);
     crow::SimpleApp app;
 
 #define __LOGIN_API__
@@ -44,7 +46,7 @@ int main(int argc, char* argv[]) {
             int rc = 0;
             std::cout << "Received JSON: " << req.body << std::endl;
             std::string msg = "";
-            rc = sys.login(req.body, msg);
+            rc = sys->login(req.body, msg);
             if (rc != 0) {
                 return crow::response(rc, msg);
             }
@@ -58,7 +60,7 @@ int main(int argc, char* argv[]) {
             int rc = 0;
             std::cout << "Received register request: " << req.body << std::endl;
             std::string msg = "";
-            rc = sys.registerUser(req.body, msg);
+            rc = sys->registerUser(req.body, msg);
             if (rc != 0) {
                 return crow::response(rc, msg);
             }
@@ -73,7 +75,7 @@ int main(int argc, char* argv[]) {
             int rc = 0;
             std::cout << "Received JSON: " << req.body << std::endl;
             std::string msg = "";
-            rc = sys.logout(req.body, msg);
+            rc = sys->logout(req.body, msg);
             if (rc != 0) {
                 return crow::response(rc, msg);
             }
@@ -88,7 +90,7 @@ int main(int argc, char* argv[]) {
             int rc = 0;
             std::cout << "Received JSON: " << req.body << std::endl;
             std::string msg = "";
-            rc = sys.listTracablePro(req.body, msg);
+            rc = sys->listTracablePro(req.body, msg);
             if (rc != 0) {
                 return crow::response(rc, msg);
             }
@@ -103,7 +105,7 @@ int main(int argc, char* argv[]) {
             int rc = 0;
             std::cout << "Received JSON: " << req.body << std::endl;
             std::string msg = "";
-            rc = sys.dropTracablePro(req.body, msg);
+            rc = sys->dropTracablePro(req.body, msg);
             if (rc != 0) {
                 return crow::response(rc, msg);
             }
@@ -118,7 +120,7 @@ int main(int argc, char* argv[]) {
             int rc = 0;
             std::cout << "Received JSON: " << req.body << std::endl;
             std::string msg = "";
-            rc = sys.risk(req.body, msg);
+            rc = sys->risk(req.body, msg);
             if (rc != 0) {
                 return crow::response(rc, msg);
             }
@@ -133,7 +135,7 @@ int main(int argc, char* argv[]) {
             int rc = 0;
             std::cout << "Received JSON: " << req.body << std::endl;
             std::string msg = "";
-            rc = sys.traceBack(req.body, msg);
+            rc = sys->traceBack(req.body, msg);
             if (rc != 0) {
                 return crow::response(rc, msg);
             }
@@ -148,7 +150,7 @@ int main(int argc, char* argv[]) {
             int rc = 0;
             std::cout << "Received JSON: " << req.body << std::endl;
             std::string msg = "";
-            rc = sys.makeTrade(req.body, msg);
+            rc = sys->makeTrade(req.body, msg);
             if (rc != 0) {
                 return crow::response(rc, msg);
             }
@@ -163,7 +165,7 @@ int main(int argc, char* argv[]) {
             int rc = 0;
             std::cout << "Received JSON: " << req.body << std::endl;
             std::string msg = "";
-            rc = sys.listProBasic(req.body, msg);
+            rc = sys->listProBasic(req.body, msg);
             if (rc != 0) {
                 return crow::response(rc, msg);
             }
@@ -178,7 +180,7 @@ int main(int argc, char* argv[]) {
             int rc = 0;
             std::cout << "Received JSON: " << req.body << std::endl;
             std::string msg = "";
-            rc = sys.listRiskPro(req.body, msg);
+            rc = sys->listRiskPro(req.body, msg);
             if (rc != 0) {
                 return crow::response(rc, msg);
             }
@@ -192,7 +194,7 @@ int main(int argc, char* argv[]) {
             int rc = 0;
             std::cout << "Received JSON: " << req.body << std::endl;
             std::string msg = "";
-            rc = sys.getUserInfo(req.body, msg);
+            rc = sys->getUserInfo(req.body, msg);
             if (rc != 0) {
                 return crow::response(rc, msg);
             }
@@ -206,7 +208,7 @@ int main(int argc, char* argv[]) {
             int rc = 0;
             std::cout << "Received JSON: " << req.body << std::endl;
             std::string msg = "";
-            rc = sys.updatePassword(req.body, msg);
+            rc = sys->updatePassword(req.body, msg);
             if (rc != 0) {
                 return crow::response(rc, msg);
             }
@@ -220,7 +222,7 @@ int main(int argc, char* argv[]) {
             int rc = 0;
             std::cout << "Received JSON: " << req.body << std::endl;
             std::string msg = "";
-            rc = sys.updateUserInfo(req.body, msg);
+            rc = sys->updateUserInfo(req.body, msg);
             if (rc != 0) {
                 return crow::response(rc, msg);
             }
@@ -234,7 +236,7 @@ int main(int argc, char* argv[]) {
             int rc = 0;
             std::cout << "Received upload request, body size: " << req.body.size() << std::endl;
             std::string msg = "";
-            rc = sys.uploadFile(req.body, msg);
+            rc = sys->uploadFile(req.body, msg);
             if (rc != 0) {
                 return crow::response(rc, msg);
             }
@@ -248,7 +250,7 @@ int main(int argc, char* argv[]) {
             int rc = 0;
             std::cout << "Received list_files request: " << req.body << std::endl;
             std::string msg = "";
-            rc = sys.listFiles(req.body, msg);
+            rc = sys->listFiles(req.body, msg);
             if (rc != 0) {
                 return crow::response(rc, msg);
             }
@@ -261,7 +263,20 @@ int main(int argc, char* argv[]) {
         .methods("POST"_method)([](const crow::request& req) {
             int rc = 0;
             std::string msg = "";
-            rc = sys.monitor(req.body, msg);
+            rc = sys->monitor(req.body, msg);
+            if (rc != 0) {
+                return crow::response(rc, msg);
+            }
+            auto res = crow::response(200, msg);
+            return res;
+        });
+
+    // 系统日志：POST /api/logs
+    CROW_ROUTE(app, "/api/logs")
+        .methods("POST"_method)([](const crow::request& req) {
+            int rc = 0;
+            std::string msg = "";
+            rc = sys->getLogs(req.body, msg);
             if (rc != 0) {
                 return crow::response(rc, msg);
             }
@@ -389,6 +404,10 @@ int main(int argc, char* argv[]) {
 
     app.port(20510).multithreaded().run();
 
+    delete sys;
+    sys = nullptr;
+    delete dlog;
+    dlog = nullptr;
     return 0;
 }
 
