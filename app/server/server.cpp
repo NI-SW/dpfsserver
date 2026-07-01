@@ -11,6 +11,7 @@
 #include <dcsystem/system.hpp>
 #include <log/logbinary.h>
 #include <fstream>
+#include <unistd.h>
 #include <sstream>
 #include <iomanip>
 initSystemInfo initInfo;
@@ -404,11 +405,15 @@ int main(int argc, char* argv[]) {
 
     app.port(20510).multithreaded().run();
 
+    // 手动清理
     delete sys;
     sys = nullptr;
     delete dlog;
     dlog = nullptr;
-    return 0;
+
+    // 使用 _exit 跳过全局析构阶段，避免 Crow/Boost/logrecord 静态对象
+    // 析构顺序冲突导致的 double free 崩溃
+    _exit(0);
 }
 
 void Args_Error()

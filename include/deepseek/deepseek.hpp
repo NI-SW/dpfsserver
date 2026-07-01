@@ -1,3 +1,6 @@
+#ifndef DEEPSEEK_DEEPSEEK_HPP
+#define DEEPSEEK_DEEPSEEK_HPP
+
 #include <iostream>
 #include <string>
 #include <curl/curl.h>
@@ -294,3 +297,5 @@ private:
     std::string baseUrl_;
     std::string model_;
 };
+
+#endif // DEEPSEEK_DEEPSEEK_HPP

@@ -114,6 +114,8 @@ private:
     int checkTokenAndPermission(int64_t user_token, const std::string& permCode, UserSession*& session);
 
     int generateRiskReport(const CGrpcCli::CResult& result, std::string& risk_info, CGrpcCli& client);
+    // 从 MySQL 读取用户 description 字段（患者信息）
+    std::string getUserDescription(int64_t uid);
     // 路径中如果某个配料存在安全风险，则整个产品都存在安全风险，可以快速标记该产品是否合规。
     int recursiveTrace(const std::string& trace_code, CGrpcCli& client, std::string& result, std::string indent, void* tDoc = nullptr, void* parentDoc = nullptr, double parentProportion = 1.0, std::map<std::string, double>* metaIngredients = nullptr);
 };

@@ -4,6 +4,7 @@
 #include <rapidjson/writer.h>
 #include <rapidjson/stringbuffer.h>
 #include <deepseek/deepseek.hpp>
+#include <extractmodel/extract.hpp>
 #include <fstream>
 #include <log/logbinary.h>
 
@@ -49,6 +50,8 @@ std::string g_mysqlDatabase = "dpfs";
 
 std::string g_aiPromptTemplate = "";
 std::string g_aiPromptTemplate4trace = "";
+std::string g_aiPromptTemplate4extract = "";    // extractmodel 症状提取提示词
+std::string g_aiPromptTemplate4foodrisk = "";   // DeepSeek 食品风险评估报告提示词
 
 // 全局日志实例
 logrecord* dlog = nullptr;
@@ -97,6 +100,25 @@ int CSystem::init(const initSystemInfo& initInfo) {
     promptFile4Trace.read(buf4Trace, sizeof(buf4Trace) - 1);
     g_aiPromptTemplate4trace = std::string(buf4Trace);
     promptFile4Trace.close();
+
+    // 加载 extractmodel 症状提取提示词
+    std::fstream promptFile4Extract("prompt.extract", std::ios::in);
+    if (promptFile4Extract.is_open()) {
+        char buf4Extract[65535] {0};
+        promptFile4Extract.read(buf4Extract, sizeof(buf4Extract) - 1);
+        g_aiPromptTemplate4extract = std::string(buf4Extract);
+        promptFile4Extract.close();
+    }
+
+    // 加载 DeepSeek 食品风险评估报告提示词
+    std::fstream promptFile4FoodRisk("prompt.foodrisk", std::ios::in);
+    if (promptFile4FoodRisk.is_open()) {
+        char buf4FoodRisk[65535] {0};
+        promptFile4FoodRisk.read(buf4FoodRisk, sizeof(buf4FoodRisk) - 1);
+        g_aiPromptTemplate4foodrisk = std::string(buf4FoodRisk);
+        promptFile4FoodRisk.close();
+    }
+
     return 0;
 }
 
@@ -1190,6 +1212,66 @@ int CSystem::recursiveTrace(const std::string& trace_code, CGrpcCli& client, std
 }
 
 // ============================================================================
+// getUserDescription — 从 MySQL 读取用户的 description 字段
+// ============================================================================
+std::string CSystem::getUserDescription(int64_t uid) {
+    std::string description;
+
+    SQLHENV env = SQL_NULL_HANDLE;
+    SQLHDBC dbc = SQL_NULL_HANDLE;
+    SQLHSTMT stmt = SQL_NULL_HANDLE;
+    SQLRETURN ret;
+
+    ret = SQLAllocHandle(SQL_HANDLE_ENV, SQL_NULL_HANDLE, &env);
+    if (ret != SQL_SUCCESS && ret != SQL_SUCCESS_WITH_INFO) return "";
+    SQLSetEnvAttr(env, SQL_ATTR_ODBC_VERSION, (SQLPOINTER)SQL_OV_ODBC3, 0);
+
+    ret = SQLAllocHandle(SQL_HANDLE_DBC, env, &dbc);
+    if (ret != SQL_SUCCESS && ret != SQL_SUCCESS_WITH_INFO) {
+        SQLFreeHandle(SQL_HANDLE_ENV, env);
+        return "";
+    }
+
+    std::string connStr = buildOdbcConnStr();
+    ret = SQLDriverConnect(dbc, nullptr, (SQLCHAR*)connStr.c_str(), SQL_NTS,
+                           nullptr, 0, nullptr, SQL_DRIVER_COMPLETE);
+    if (ret != SQL_SUCCESS && ret != SQL_SUCCESS_WITH_INFO) {
+        SQLFreeHandle(SQL_HANDLE_DBC, dbc);
+        SQLFreeHandle(SQL_HANDLE_ENV, env);
+        return "";
+    }
+
+    ret = SQLAllocHandle(SQL_HANDLE_STMT, dbc, &stmt);
+    if (ret != SQL_SUCCESS && ret != SQL_SUCCESS_WITH_INFO) {
+        SQLDisconnect(dbc);
+        SQLFreeHandle(SQL_HANDLE_DBC, dbc);
+        SQLFreeHandle(SQL_HANDLE_ENV, env);
+        return "";
+    }
+
+    char sql[512];
+    snprintf(sql, sizeof(sql), "SELECT description FROM users WHERE id = %lld", (long long)uid);
+    ret = SQLExecDirect(stmt, (SQLCHAR*)sql, SQL_NTS);
+    if (ret == SQL_SUCCESS || ret == SQL_SUCCESS_WITH_INFO) {
+        if (SQLFetch(stmt) == SQL_SUCCESS) {
+            char buf[2048] = {0};
+            SQLLEN ind = 0;
+            SQLGetData(stmt, 1, SQL_C_CHAR, buf, sizeof(buf), &ind);
+            if (ind != SQL_NULL_DATA) {
+                description = std::string(buf);
+            }
+        }
+    }
+
+    SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+    SQLDisconnect(dbc);
+    SQLFreeHandle(SQL_HANDLE_DBC, dbc);
+    SQLFreeHandle(SQL_HANDLE_ENV, env);
+
+    return description;
+}
+
+// ============================================================================
 // generateRiskReport — 生成风险评估报告（待优化，使用内置模型）
 // ============================================================================
 int CSystem::generateRiskReport(const CGrpcCli::CResult& result, std::string& risk_info, CGrpcCli& client) {
@@ -1527,11 +1609,52 @@ int CSystem::traceBack(const std::string& request, std::string& response) {
 
     if (aiRisk == 1) {
         const std::string& apiKey = g_apiKey;
-        DeepSeekClient dclient(apiKey);
-        std::string userInput;
-        userInput += g_aiPromptTemplate4trace;
-        userInput += traceBaseResult + "\n" + traceTradeInfo + "\n" + ingredientInfoStr + "\n";
-        aiRiskStr = dclient.Chat(userInput);
+
+        // 获取用户 description（患者信息）
+        std::string userDesc = getUserDescription(session->uid);
+        cout << "[AI Food Risk] User description: " << (userDesc.empty() ? "(empty)" : userDesc.substr(0, 100) + "...") << endl;
+        dlog->log_inf("[AI Food Risk] User uid=%lld description length=%zu\n", (long long)session->uid, userDesc.size());
+
+        if (!userDesc.empty() && !g_aiPromptTemplate4extract.empty() && !g_aiPromptTemplate4foodrisk.empty()) {
+            // 新流程：提取患者症状 → 合并原料 → DeepSeek 生成食品风险评估报告
+
+            // Step 1: 调用 extractmodel 提取患者病情特征
+            cout << "[AI Food Risk] Step 1: Extracting patient symptoms via extractmodel..." << endl;
+            dlog->log_inf("[AI Food Risk] Step 1: Extracting patient symptoms via extractmodel\n");
+            ExtractModelClient eclient("");
+            // 将 system prompt 和 patient description 合并为单条 user 消息
+            std::string combinedInput = g_aiPromptTemplate4extract + "\n\n" + userDesc;
+            std::string extractedSymptoms = eclient.ChatSync(combinedInput);
+            cout << "[AI Food Risk] Extracted symptoms: " << extractedSymptoms.substr(0, 500) << endl;
+            dlog->log_inf("[AI Food Risk] Extracted symptoms length=%zu\n", extractedSymptoms.size());
+            dlog->log_inf("[AI Food Risk] Extracted symptoms content: %.500s\n", extractedSymptoms.c_str());
+
+            // Step 2: 合并患者症状 + 溯源原料信息，构造食品风险评估输入
+            std::string foodRiskInput;
+            foodRiskInput.reserve(4096);
+            foodRiskInput += g_aiPromptTemplate4foodrisk;
+            foodRiskInput += "\n\n【患者临床症状清单】\n" + extractedSymptoms + "\n\n";
+            foodRiskInput += traceBaseResult + "\n" + traceTradeInfo + "\n" + ingredientInfoStr + "\n";
+
+            // Step 3: 发送给 DeepSeek 生成 AI 食品风险评估报告
+            cout << "[AI Food Risk] Step 2: Sending to DeepSeek for food risk assessment..." << endl;
+            dlog->log_inf("[AI Food Risk] Step 2: Sending to DeepSeek for food risk assessment\n");
+            DeepSeekClient dclient(apiKey);
+            aiRiskStr = dclient.Chat(foodRiskInput);
+            cout << "[AI Food Risk] Report generated, length=" << aiRiskStr.size() << endl;
+            dlog->log_inf("[AI Food Risk] Report generated, length=%zu\n", aiRiskStr.size());
+        } else {
+            // 降级：无患者描述或无专用提示词，使用原有逻辑
+            if (userDesc.empty()) {
+                cout << "[AI Food Risk] User description empty, falling back to basic risk report" << endl;
+                dlog->log_inf("[AI Food Risk] User description empty, falling back to basic risk report\n");
+            }
+            DeepSeekClient dclient(apiKey);
+            std::string userInput;
+            userInput += g_aiPromptTemplate4trace;
+            userInput += traceBaseResult + "\n" + traceTradeInfo + "\n" + ingredientInfoStr + "\n";
+            aiRiskStr = dclient.Chat(userInput);
+        }
     }
 
     rapidjson::StringBuffer tbuffer;

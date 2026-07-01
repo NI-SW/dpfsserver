@@ -1,3 +1,6 @@
+#ifndef EXTRACTMODEL_EXTRACT_HPP
+#define EXTRACTMODEL_EXTRACT_HPP
+
 #include <iostream>
 #include <string>
 #include <sstream>
@@ -105,16 +108,20 @@ public:
             CURL* curl = curl_easy_init();
             if (!curl) return "Error: Failed to initialize curl";
 
-            // 构建 JSON 请求体
+            // 手动构建 JSON 请求体字符串，避免 AddMember 移动 messages
             rapidjson::Document doc;
             doc.SetObject();
             auto& alloc = doc.GetAllocator();
 
             doc.AddMember("model", rapidjson::Value(model_.c_str(), alloc), alloc);
-            doc.AddMember("messages", messages, alloc);
             doc.AddMember("temperature", 0.7, alloc);
             doc.AddMember("max_tokens", StreamContext::MAX_TOKENS, alloc);
             doc.AddMember("stream", true, alloc);
+
+            // 将 messages 深拷贝到 doc 中（使用 CopyFrom 而非构造函数，避免移动原值）
+            rapidjson::Value msgCopy(rapidjson::kArrayType);
+            msgCopy.CopyFrom(messages, alloc);
+            doc.AddMember("messages", msgCopy, alloc);
 
             rapidjson::StringBuffer buffer;
             rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
@@ -159,19 +166,19 @@ public:
             // 在重试前，给 messages 追加一条提示，要求模型更精简地输出
             if (attempt < MAX_RETRIES - 1) {
                 rapidjson::Value retryMsg(rapidjson::kObjectType);
-                retryMsg.AddMember("role", "user", alloc);
+                retryMsg.AddMember("role", "user", allocator);
 
                 std::string retryPrompt = "你上一次的回复过长被截断了。请用更简洁的方式重新输出，"
                     "字数控制在" + std::to_string(StreamContext::MAX_TOKENS * 2) +
                     "个字符以内，只保留最核心的信息，不要重复已有内容。";
-                retryMsg.AddMember("content", rapidjson::Value(retryPrompt.c_str(), alloc), alloc);
-                messages.PushBack(retryMsg, alloc);
+                retryMsg.AddMember("content", rapidjson::Value(retryPrompt.c_str(), allocator), allocator);
+                messages.PushBack(retryMsg, allocator);
 
                 // 追加上一次的截断回复作为上下文
                 rapidjson::Value assistantMsg(rapidjson::kObjectType);
-                assistantMsg.AddMember("role", "assistant", alloc);
-                assistantMsg.AddMember("content", rapidjson::Value(ctx.fullContent.c_str(), alloc), alloc);
-                messages.PushBack(assistantMsg, alloc);
+                assistantMsg.AddMember("role", "assistant", allocator);
+                assistantMsg.AddMember("content", rapidjson::Value(ctx.fullContent.c_str(), allocator), allocator);
+                messages.PushBack(assistantMsg, allocator);
             }
         }
 
@@ -273,6 +280,87 @@ public:
         return response;
     }
 
+    // 非流式对话请求（返回纯文本内容，不返回完整 JSON）
+    std::string ChatSync(const std::string& userMessage) {
+        CURL* curl = curl_easy_init();
+        if (!curl) return "Error: Failed to initialize curl";
+
+        rapidjson::Document doc;
+        doc.SetObject();
+        auto& allocator = doc.GetAllocator();
+
+        doc.AddMember("model", rapidjson::Value(model_.c_str(), allocator), allocator);
+        rapidjson::Value messages(rapidjson::kArrayType);
+        rapidjson::Value msg(rapidjson::kObjectType);
+        msg.AddMember("role", "user", allocator);
+        msg.AddMember("content", rapidjson::Value(userMessage.c_str(), allocator), allocator);
+        messages.PushBack(msg, allocator);
+        doc.AddMember("messages", messages, allocator);
+        doc.AddMember("temperature", 0.7, allocator);
+        doc.AddMember("max_tokens", StreamContext::MAX_TOKENS, allocator);
+        doc.AddMember("stream", false, allocator);
+
+        rapidjson::StringBuffer buffer;
+        rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+        doc.Accept(writer);
+        std::string postData = buffer.GetString();
+
+        struct curl_slist* headers = nullptr;
+        if (!apiKey_.empty()) {
+            headers = curl_slist_append(headers, ("Authorization: *** " + apiKey_).c_str());
+        }
+        headers = curl_slist_append(headers, "Content-Type: application/json");
+
+        std::string url = baseUrl_ + "/chat/completions";
+        std::string response;
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, postData.c_str());
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, ExtractWriteCallback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L);
+
+        CURLcode res = curl_easy_perform(curl);
+        curl_slist_free_all(headers);
+        curl_easy_cleanup(curl);
+
+        if (res != CURLE_OK) {
+            return "Error: " + std::string(curl_easy_strerror(res));
+        }
+
+        // 解析响应，提取 content
+        rapidjson::Document respDoc;
+        if (respDoc.Parse(response.c_str()).HasParseError()) {
+            // JSON 解析失败（可能含非法 UTF-8），用字符串方式提取 content
+            // 查找 "content":" 后的字符串内容
+            size_t pos = response.find("\"content\":\"");
+            if (pos != std::string::npos) {
+                pos += 11; // skip "content":"
+                size_t end = pos;
+                // 找到字符串结束的引号（跳过转义的引号）
+                while (end < response.size()) {
+                    if (response[end] == '\\') { end += 2; continue; }
+                    if (response[end] == '"') break;
+                    end++;
+                }
+                return response.substr(pos, end - pos);
+            }
+            return "Error: Failed to parse response";
+        }
+        if (respDoc.HasMember("error") && respDoc["error"].IsObject()) {
+            std::string errMsg = respDoc["error"].HasMember("message") ? respDoc["error"]["message"].GetString() : "Unknown error";
+            return "API Error: " + errMsg;
+        }
+        if (respDoc.HasMember("choices") && respDoc["choices"].IsArray() && respDoc["choices"].Size() > 0) {
+            const auto& choice = respDoc["choices"][0];
+            if (choice.HasMember("message") && choice["message"].HasMember("content")) {
+                return choice["message"]["content"].GetString();
+            }
+        }
+        return "Error: Unexpected response format";
+    }
+
     // 查询可用模型列表
     std::string ListModels() {
         CURL* curl = curl_easy_init();
@@ -335,3 +423,5 @@ private:
     std::string model_;
     int maxRetries_;
 };
+
+#endif // EXTRACTMODEL_EXTRACT_HPP
