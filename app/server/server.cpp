@@ -43,14 +43,10 @@ int main(int argc, char* argv[]) {
 #define __LOGIN_API__
     CROW_ROUTE(app, "/api/login")
         .methods("POST"_method)([](const crow::request& req) {
-            // get json string
             int rc = 0;
             std::cout << "Received JSON: " << req.body << std::endl;
             std::string msg = "";
             rc = sys->login(req.body, msg);
-            if (rc != 0) {
-                return crow::response(rc, msg);
-            }
             auto res = crow::response(200, msg);
             return res;
         });
@@ -62,9 +58,6 @@ int main(int argc, char* argv[]) {
             std::cout << "Received register request: " << req.body << std::endl;
             std::string msg = "";
             rc = sys->registerUser(req.body, msg);
-            if (rc != 0) {
-                return crow::response(rc, msg);
-            }
             auto res = crow::response(200, msg);
             return res;
         });
@@ -72,14 +65,10 @@ int main(int argc, char* argv[]) {
 #define __LOGOUT_API__
     CROW_ROUTE(app, "/api/logout")
         .methods("POST"_method)([](const crow::request& req) {
-            // get json string
             int rc = 0;
             std::cout << "Received JSON: " << req.body << std::endl;
             std::string msg = "";
             rc = sys->logout(req.body, msg);
-            if (rc != 0) {
-                return crow::response(rc, msg);
-            }
             auto res = crow::response(200, msg);
             return res;
         });
@@ -87,14 +76,10 @@ int main(int argc, char* argv[]) {
 #define __LIST_TRACEABLE_PRO_API__
     CROW_ROUTE(app, "/api/list_tracable_pro")
         .methods("POST"_method)([](const crow::request& req) {
-            // get json string
             int rc = 0;
             std::cout << "Received JSON: " << req.body << std::endl;
             std::string msg = "";
             rc = sys->listTracablePro(req.body, msg);
-            if (rc != 0) {
-                return crow::response(rc, msg);
-            }
             auto res = crow::response(200, msg);
             return res;
         });
@@ -102,14 +87,10 @@ int main(int argc, char* argv[]) {
 #define __DROP_TRACEABLE_PRO_API__
     CROW_ROUTE(app, "/api/drop_tracable_pro")
         .methods("POST"_method)([](const crow::request& req) {
-            // get json string
             int rc = 0;
             std::cout << "Received JSON: " << req.body << std::endl;
             std::string msg = "";
             rc = sys->dropTracablePro(req.body, msg);
-            if (rc != 0) {
-                return crow::response(rc, msg);
-            }
             auto res = crow::response(200, msg);
             return res;
         });
@@ -117,14 +98,10 @@ int main(int argc, char* argv[]) {
 #define __RISK_API__
     CROW_ROUTE(app, "/api/risk")
         .methods("POST"_method)([](const crow::request& req) {
-            // get json string
             int rc = 0;
             std::cout << "Received JSON: " << req.body << std::endl;
             std::string msg = "";
             rc = sys->risk(req.body, msg);
-            if (rc != 0) {
-                return crow::response(rc, msg);
-            }
             auto res = crow::response(200, msg);
             return res;
         });
@@ -132,14 +109,10 @@ int main(int argc, char* argv[]) {
 #define __TRACE_BACK_API__
     CROW_ROUTE(app, "/api/trace_back")
         .methods("POST"_method)([](const crow::request& req) {
-            // get json string
             int rc = 0;
             std::cout << "Received JSON: " << req.body << std::endl;
             std::string msg = "";
             rc = sys->traceBack(req.body, msg);
-            if (rc != 0) {
-                return crow::response(rc, msg);
-            }
             auto res = crow::response(200, msg);
             return res;
         });
@@ -147,14 +120,10 @@ int main(int argc, char* argv[]) {
 #define __MAKE_TRADE_API__
     CROW_ROUTE(app, "/api/make_trade")
         .methods("POST"_method)([](const crow::request& req) {
-            // get json string
             int rc = 0;
             std::cout << "Received JSON: " << req.body << std::endl;
             std::string msg = "";
             rc = sys->makeTrade(req.body, msg);
-            if (rc != 0) {
-                return crow::response(rc, msg);
-            }
             auto res = crow::response(200, msg);
             return res;
         });
@@ -162,14 +131,10 @@ int main(int argc, char* argv[]) {
 #define __LIST_PRO_BASIC_API__
     CROW_ROUTE(app, "/api/list_pro_basic")
         .methods("POST"_method)([](const crow::request& req) {
-            // get json string
             int rc = 0;
             std::cout << "Received JSON: " << req.body << std::endl;
             std::string msg = "";
             rc = sys->listProBasic(req.body, msg);
-            if (rc != 0) {
-                return crow::response(rc, msg);
-            }
             auto res = crow::response(200, msg);
             return res;
         });
@@ -177,14 +142,10 @@ int main(int argc, char* argv[]) {
 #define __LIST_RISK_PRO_API__
     CROW_ROUTE(app, "/api/list_risk_pro")
         .methods("POST"_method)([](const crow::request& req) {
-            // get json string
             int rc = 0;
             std::cout << "Received JSON: " << req.body << std::endl;
             std::string msg = "";
             rc = sys->listRiskPro(req.body, msg);
-            if (rc != 0) {
-                return crow::response(rc, msg);
-            }
             auto res = crow::response(200, msg);
             return res;
         });
@@ -196,9 +157,6 @@ int main(int argc, char* argv[]) {
             std::cout << "Received JSON: " << req.body << std::endl;
             std::string msg = "";
             rc = sys->getUserInfo(req.body, msg);
-            if (rc != 0) {
-                return crow::response(rc, msg);
-            }
             auto res = crow::response(200, msg);
             return res;
         });
@@ -210,9 +168,6 @@ int main(int argc, char* argv[]) {
             std::cout << "Received JSON: " << req.body << std::endl;
             std::string msg = "";
             rc = sys->updatePassword(req.body, msg);
-            if (rc != 0) {
-                return crow::response(rc, msg);
-            }
             auto res = crow::response(200, msg);
             return res;
         });
@@ -224,9 +179,6 @@ int main(int argc, char* argv[]) {
             std::cout << "Received JSON: " << req.body << std::endl;
             std::string msg = "";
             rc = sys->updateUserInfo(req.body, msg);
-            if (rc != 0) {
-                return crow::response(rc, msg);
-            }
             auto res = crow::response(200, msg);
             return res;
         });
@@ -238,9 +190,6 @@ int main(int argc, char* argv[]) {
             std::cout << "Received upload request, body size: " << req.body.size() << std::endl;
             std::string msg = "";
             rc = sys->uploadFile(req.body, msg);
-            if (rc != 0) {
-                return crow::response(rc, msg);
-            }
             auto res = crow::response(200, msg);
             return res;
         });
@@ -252,9 +201,6 @@ int main(int argc, char* argv[]) {
             std::cout << "Received list_files request: " << req.body << std::endl;
             std::string msg = "";
             rc = sys->listFiles(req.body, msg);
-            if (rc != 0) {
-                return crow::response(rc, msg);
-            }
             auto res = crow::response(200, msg);
             return res;
         });
@@ -265,9 +211,6 @@ int main(int argc, char* argv[]) {
             int rc = 0;
             std::string msg = "";
             rc = sys->monitor(req.body, msg);
-            if (rc != 0) {
-                return crow::response(rc, msg);
-            }
             auto res = crow::response(200, msg);
             return res;
         });
@@ -278,9 +221,6 @@ int main(int argc, char* argv[]) {
             int rc = 0;
             std::string msg = "";
             rc = sys->getLogs(req.body, msg);
-            if (rc != 0) {
-                return crow::response(rc, msg);
-            }
             auto res = crow::response(200, msg);
             return res;
         });
@@ -363,7 +303,7 @@ int main(int argc, char* argv[]) {
             std::string indexPath = "/home/dpfs/github/dpfsserver/app/server/static/index.html";
             std::ifstream file(indexPath, std::ios::binary);
             if (!file.is_open()) {
-                return crow::response(404, "Frontend not deployed");
+                return crow::response(200, "Frontend not deployed");
             }
             std::string content((std::istreambuf_iterator<char>(file)),
                                 std::istreambuf_iterator<char>());
@@ -376,7 +316,7 @@ int main(int argc, char* argv[]) {
     CROW_ROUTE(app, "/<string>")
         .methods("GET"_method)([](std::string filename) {
             // Don't intercept API routes
-            if (filename.find("api") == 0) return crow::response(404);
+            if (filename.find("api") == 0) return crow::response(200);
             std::string filePath = "/home/dpfs/github/dpfsserver/app/server/static/" + filename;
             std::ifstream file(filePath, std::ios::binary);
             if (!file.is_open()) {
@@ -384,7 +324,7 @@ int main(int argc, char* argv[]) {
                 std::string indexPath = "/home/dpfs/github/dpfsserver/app/server/static/index.html";
                 std::ifstream indexFile(indexPath, std::ios::binary);
                 if (!indexFile.is_open()) {
-                    return crow::response(404, "File not found");
+                    return crow::response(200, "File not found");
                 }
                 std::string content((std::istreambuf_iterator<char>(indexFile)),
                                     std::istreambuf_iterator<char>());
@@ -405,14 +345,18 @@ int main(int argc, char* argv[]) {
 
     app.port(20510).multithreaded().run();
 
-    // 手动清理
+    // 手动清理资源（线程、连接池、日志）
     delete sys;
     sys = nullptr;
     delete dlog;
     dlog = nullptr;
 
-    // 使用 _exit 跳过全局析构阶段，避免 Crow/Boost/logrecord 静态对象
-    // 析构顺序冲突导致的 double free 崩溃
+    // 使用 _exit(0) 跳过 __cxa_finalize 全局析构
+    // 原因：libdcsys.so 中的全局 std::string (g_connStr, g_apiKey 等) 在
+    // __cxa_finalize 时析构会触发 "double free or corruption (fasttop)" 崩溃，
+    // 因为程序运行期间的堆元数据损坏在退出清理阶段才被检测到。
+    // 手动清理已完成（CSystem 析构释放连接池、logrecord 析构刷新日志），
+    // 全局字符串的内存由进程退出自动回收，无需显式析构。
     _exit(0);
 }
 

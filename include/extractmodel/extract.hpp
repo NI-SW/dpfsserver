@@ -9,6 +9,34 @@
 #include <rapidjson/writer.h>
 #include <rapidjson/stringbuffer.h>
 
+#include <cstdint>
+
+// 去除非法 UTF-8 字节，保留合法字符（防御性清洗）
+static std::string SanitizeUtf8(const std::string& input) {
+    std::string result;
+    result.reserve(input.size());
+    size_t i = 0;
+    while (i < input.size()) {
+        uint8_t c = static_cast<uint8_t>(input[i]);
+        int len = 0;
+        if (c <= 0x7F)       { len = 1; }
+        else if ((c & 0xE0) == 0xC0) { len = 2; }
+        else if ((c & 0xF0) == 0xE0) { len = 3; }
+        else if ((c & 0xF8) == 0xF0) { len = 4; }
+        else { ++i; continue; } // 非法起始字节，跳过
+        if (i + len > input.size()) break;
+        bool valid = true;
+        for (int j = 1; j < len; ++j) {
+            if ((static_cast<uint8_t>(input[i + j]) & 0xC0) != 0x80) {
+                valid = false; break;
+            }
+        }
+        if (valid) { result.append(input, i, len); i += len; }
+        else       { ++i; }
+    }
+    return result;
+}
+
 // 流式回调上下文
 struct StreamContext {
     std::string fullContent;        // 累积的完整内容
@@ -192,10 +220,12 @@ public:
         doc.SetObject();
         auto& allocator = doc.GetAllocator();
 
+        std::string safeMessage = SanitizeUtf8(userMessage);
+
         rapidjson::Value messages(rapidjson::kArrayType);
         rapidjson::Value message(rapidjson::kObjectType);
         message.AddMember("role", "user", allocator);
-        message.AddMember("content", rapidjson::Value(userMessage.c_str(), allocator), allocator);
+        message.AddMember("content", rapidjson::Value(safeMessage.c_str(), allocator), allocator);
         messages.PushBack(message, allocator);
 
         return StreamChatInternal(messages, allocator);
@@ -207,18 +237,21 @@ public:
         doc.SetObject();
         auto& allocator = doc.GetAllocator();
 
+        std::string safeSystem = SanitizeUtf8(systemPrompt);
+        std::string safeUser   = SanitizeUtf8(userMessage);
+
         rapidjson::Value messages(rapidjson::kArrayType);
 
         // system message
         rapidjson::Value sysMsg(rapidjson::kObjectType);
         sysMsg.AddMember("role", "system", allocator);
-        sysMsg.AddMember("content", rapidjson::Value(systemPrompt.c_str(), allocator), allocator);
+        sysMsg.AddMember("content", rapidjson::Value(safeSystem.c_str(), allocator), allocator);
         messages.PushBack(sysMsg, allocator);
 
         // user message
         rapidjson::Value userMsg(rapidjson::kObjectType);
         userMsg.AddMember("role", "user", allocator);
-        userMsg.AddMember("content", rapidjson::Value(userMessage.c_str(), allocator), allocator);
+        userMsg.AddMember("content", rapidjson::Value(safeUser.c_str(), allocator), allocator);
         messages.PushBack(userMsg, allocator);
 
         return StreamChatInternal(messages, allocator);
@@ -230,6 +263,8 @@ public:
         CURL* curl = curl_easy_init();
         if (!curl) return "{\"error\": \"Failed to initialize curl\"}";
 
+        std::string safeMessage = SanitizeUtf8(userMessage);
+
         rapidjson::Document doc;
         doc.SetObject();
         auto& allocator = doc.GetAllocator();
@@ -239,7 +274,7 @@ public:
         rapidjson::Value messages(rapidjson::kArrayType);
         rapidjson::Value message(rapidjson::kObjectType);
         message.AddMember("role", "user", allocator);
-        message.AddMember("content", rapidjson::Value(userMessage.c_str(), allocator), allocator);
+        message.AddMember("content", rapidjson::Value(safeMessage.c_str(), allocator), allocator);
         messages.PushBack(message, allocator);
         doc.AddMember("messages", messages, allocator);
 
@@ -285,6 +320,9 @@ public:
         CURL* curl = curl_easy_init();
         if (!curl) return "Error: Failed to initialize curl";
 
+        // 防御性清洗：确保发送到服务器的文本是合法 UTF-8
+        std::string safeMessage = SanitizeUtf8(userMessage);
+
         rapidjson::Document doc;
         doc.SetObject();
         auto& allocator = doc.GetAllocator();
@@ -293,7 +331,7 @@ public:
         rapidjson::Value messages(rapidjson::kArrayType);
         rapidjson::Value msg(rapidjson::kObjectType);
         msg.AddMember("role", "user", allocator);
-        msg.AddMember("content", rapidjson::Value(userMessage.c_str(), allocator), allocator);
+        msg.AddMember("content", rapidjson::Value(safeMessage.c_str(), allocator), allocator);
         messages.PushBack(msg, allocator);
         doc.AddMember("messages", messages, allocator);
         doc.AddMember("temperature", 0.7, allocator);

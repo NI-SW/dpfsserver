@@ -86,7 +86,9 @@ public:
         // 解析 JSON 响应
         rapidjson::Document respDoc;
         if (respDoc.Parse(response.c_str()).HasParseError()) {
-            return "Error: Failed to parse JSON response";
+            // 非 JSON 响应（可能是 HTML 错误页），截取前200字符作为诊断信息
+            std::string snippet = response.substr(0, 200);
+            return "Error: DeepSeek API returned non-JSON response. Preview: " + snippet;
         }
 
         if (respDoc.HasMember("error") && respDoc["error"].IsObject()) {
@@ -167,7 +169,9 @@ public:
 
         rapidjson::Document respDoc;
         if (respDoc.Parse(response.c_str()).HasParseError()) {
-            return "Error: Failed to parse JSON response";
+            // 非 JSON 响应（可能是 HTML 错误页），截取前200字符作为诊断信息
+            std::string snippet = response.substr(0, 200);
+            return "Error: DeepSeek API returned non-JSON response. Preview: " + snippet;
         }
 
         if (respDoc.HasMember("error") && respDoc["error"].IsObject()) {

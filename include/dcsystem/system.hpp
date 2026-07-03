@@ -8,6 +8,7 @@
 #include <dpfsclient/grpcclient.hpp>
 #include <basic/dpfsconst.hpp>
 #include <log/logbinary.h>
+#include "dcsystem/dpfs_pool.hpp"
 
 // 全局日志实例
 extern logrecord* dlog;
@@ -43,6 +44,10 @@ struct UserSession {
     std::string role;
     std::unordered_set<std::string> permissions;
     std::shared_ptr<CGrpcCli> client;
+    std::chrono::steady_clock::time_point last_access;  // 最后操作时间
+
+    UserSession() : uid(0), last_access(std::chrono::steady_clock::now()) {}
+    void touch() { last_access = std::chrono::steady_clock::now(); }
 };
 
 class CSystem {
@@ -105,13 +110,25 @@ public:
 
 private:
 
+    // 共享 gRPC 通道（所有用户复用同一连接，避免多连接导致 dpfs 后端崩溃）
+    std::shared_ptr<grpc::Channel> dpfs_channel;
+    // dpfs 连接池：复用预认证的 CGrpcCli，避免频繁 Login/Logoff 导致页面缓存错乱
+    std::unique_ptr<DpfsConnectionPool> dpfs_pool;
+
     // <user_token, UserSession>
     std::mutex user_tokens_mutex;
-    int64_t usr_token = 0;
+    int64_t usr_token = 1;
     std::unordered_map<int64_t, std::shared_ptr<UserSession>> user_tokens;
 
     // RBAC 权限校验
     int checkTokenAndPermission(int64_t user_token, const std::string& permCode, UserSession*& session);
+
+    // session 超时清理线程
+    void sessionCleanupLoop();
+    void sessionCleanup();
+    std::thread session_cleanup_thread_;
+    bool stop_session_cleanup_ = false;
+    std::chrono::seconds session_timeout_{900};  // 15 分钟
 
     int generateRiskReport(const CGrpcCli::CResult& result, std::string& risk_info, CGrpcCli& client);
     // 从 MySQL 读取用户 description 字段（患者信息）

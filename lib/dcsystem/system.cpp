@@ -15,6 +15,7 @@ extern logrecord* dlog;
 #include <sqlext.h>
 #include <cstring>
 #include <sys/stat.h>
+#include <cstdint>
 #include <sys/types.h>
 #include <vector>
 #include <dirent.h>
@@ -61,7 +62,30 @@ CSystem::CSystem() {
 }
 
 CSystem::~CSystem() {
+    // 1. 停止 session 清理线程
+    stop_session_cleanup_ = true;
+    if (session_cleanup_thread_.joinable()) {
+        session_cleanup_thread_.join();
+    }
 
+    // 2. 释放所有活跃 session 的 dpfs 连接回连接池
+    size_t released_count = 0;
+    {
+        std::lock_guard<std::mutex> lock(user_tokens_mutex);
+        for (auto& [token, session] : user_tokens) {
+            if (session->client && dpfs_pool) {
+                dpfs_pool->release(session->client);
+                session->client.reset();
+                ++released_count;
+            }
+        }
+        user_tokens.clear();
+    }
+
+    // 注意：不在这里使用 dlog，因为 dlog 可能在此之后被删除
+    if (released_count > 0) {
+        std::cout << "[SYSTEM] CSystem destructor: released " << released_count << " sessions" << std::endl;
+    }
 }
 
 int CSystem::init(const initSystemInfo& initInfo) {
@@ -118,6 +142,9 @@ int CSystem::init(const initSystemInfo& initInfo) {
         g_aiPromptTemplate4foodrisk = std::string(buf4FoodRisk);
         promptFile4FoodRisk.close();
     }
+
+    // 启动 session 超时清理线程（15分钟无操作自动登出）
+    session_cleanup_thread_ = std::thread(&CSystem::sessionCleanupLoop, this);
 
     return 0;
 }
@@ -179,6 +206,7 @@ int CSystem::checkTokenAndPermission(int64_t user_token, const std::string& perm
         return -EINVAL;
     }
     session = it->second.get();
+    session->touch();  // 更新最后操作时间
     // admin 角色拥有所有权限
     if (session->role == "admin") {
         this->user_tokens_mutex.unlock();
@@ -193,7 +221,72 @@ int CSystem::checkTokenAndPermission(int64_t user_token, const std::string& perm
     return 0;
 }
 
+// ============================================================================
+// Session 超时清理：15 分钟无操作自动登出
+// ============================================================================
+void CSystem::sessionCleanupLoop() {
+    try {
+        while (!stop_session_cleanup_) {
+            std::this_thread::sleep_for(std::chrono::seconds(60));
+            if (stop_session_cleanup_) break;
+            sessionCleanup();
+        }
+    } catch (const std::exception& e) {
+        dlog->log_error("[SESSION] sessionCleanupLoop exception: %s\n", e.what());
+    } catch (...) {
+        dlog->log_error("[SESSION] sessionCleanupLoop unknown exception\n");
+    }
+}
+
+void CSystem::sessionCleanup() {
+    auto now = std::chrono::steady_clock::now();
+    std::vector<int64_t> expired_tokens;
+
+    this->user_tokens_mutex.lock();
+    for (auto& [token, session] : user_tokens) {
+        if (now - session->last_access > session_timeout_) {
+            expired_tokens.push_back(token);
+        }
+    }
+    this->user_tokens_mutex.unlock();
+
+    if (expired_tokens.empty()) return;
+
+    cout << "[SESSION] Cleaning up " << expired_tokens.size() << " expired sessions" << endl;
+    dlog->log_inf("[SESSION] Cleaning up %d expired sessions\n", (int)expired_tokens.size());
+
+    for (int64_t token : expired_tokens) {
+        this->user_tokens_mutex.lock();
+        auto it = user_tokens.find(token);
+        if (it == user_tokens.end()) {
+            this->user_tokens_mutex.unlock();
+            continue;
+        }
+        auto session = it->second;
+        // 归还 dpfs 连接到连接池
+        if (session->client && dpfs_pool) {
+            dpfs_pool->release(session->client);
+        }
+        cout << "[SESSION] User " << session->username << " (token=" << token << ") timed out" << endl;
+        dlog->log_inf("[SESSION] User %s (token=%lld) timed out\n", session->username.c_str(), (long long)token);
+        user_tokens.erase(it);
+        this->user_tokens_mutex.unlock();
+    }
+}
+
 // ODBC 连接辅助
+// SQL 转义：将单引号替换为两个单引号，防止 SQL 注入
+static std::string sqlEscape(const std::string& s) {
+    std::string r;
+    r.reserve(s.size() + 8);
+    for (char c : s) {
+        if (c == '\'') r += "''";
+        else if (c == '\\') r += "\\\\";
+        else r += c;
+    }
+    return r;
+}
+
 static std::string buildOdbcConnStr() {
     return "DRIVER={MariaDB};SERVER=" + g_mysqlHost +
            ";PORT=" + std::to_string(g_mysqlPort) +
@@ -231,7 +324,7 @@ static int loadRolePermissions(const std::string& role, std::unordered_set<std::
         SQLDisconnect(dbc); SQLFreeHandle(SQL_HANDLE_DBC, dbc); SQLFreeHandle(SQL_HANDLE_ENV, env); return -EIO;
     }
 
-    std::string sql = "SELECT permission_code FROM role_permissions WHERE role = '" + role + "'";
+    std::string sql = "SELECT permission_code FROM role_permissions WHERE role = '" + sqlEscape(role) + "'";
     ret = SQLExecDirect(stmt, (SQLCHAR*)sql.c_str(), SQL_NTS);
     if (ret == SQL_SUCCESS || ret == SQL_SUCCESS_WITH_INFO) {
         while (SQLFetch(stmt) == SQL_SUCCESS) {
@@ -277,8 +370,8 @@ static void writeAuditLog(int64_t uid, const std::string& username, const std::s
     }
 
     std::string sql = "INSERT INTO audit_logs (user_id, username, role, action, resource, request_ip, result, error_msg) "
-                      "VALUES (" + std::to_string(uid) + ", '" + username + "', '" + role + "', '" +
-                      action + "', '" + resource + "', '" + ip + "', '" + result + "', '" + errorMsg + "')";
+                      "VALUES (" + std::to_string(uid) + ", '" + sqlEscape(username) + "', '" + sqlEscape(role) + "', '" +
+                      sqlEscape(action) + "', '" + sqlEscape(resource) + "', '" + sqlEscape(ip) + "', '" + sqlEscape(result) + "', '" + sqlEscape(errorMsg) + "')";
     SQLExecDirect(stmt, (SQLCHAR*)sql.c_str(), SQL_NTS);
 
     SQLFreeHandle(SQL_HANDLE_STMT, stmt);
@@ -353,7 +446,7 @@ int CSystem::login(const std::string& request, std::string& response) {
                 if (ret == SQL_SUCCESS || ret == SQL_SUCCESS_WITH_INFO) {
                     ret = SQLAllocHandle(SQL_HANDLE_STMT, dbc, &stmt);
                     if (ret == SQL_SUCCESS || ret == SQL_SUCCESS_WITH_INFO) {
-                        std::string sql = "SELECT id, role, passwd, status FROM users WHERE name = '" + username + "'";
+                        std::string sql = "SELECT id, role, passwd, status FROM users WHERE name = '" + sqlEscape(username) + "'";
                         ret = SQLExecDirect(stmt, (SQLCHAR*)sql.c_str(), SQL_NTS);
                         if (ret == SQL_SUCCESS || ret == SQL_SUCCESS_WITH_INFO) {
                             if (SQLFetch(stmt) == SQL_SUCCESS) {
@@ -420,13 +513,20 @@ int CSystem::login(const std::string& request, std::string& response) {
         return 500;
     }
 
-    // ─── 3. DPFS gRPC 连接 + root 登录 ───
-    auto channel = grpc::CreateChannel(g_connStr, grpc::InsecureChannelCredentials());
-    if (channel == nullptr) {
+    // ─── 3. DPFS gRPC 连接池 ───
+    // 共享 gRPC 通道（首次创建，后续复用）
+    if (!dpfs_channel) {
+        dpfs_channel = grpc::CreateChannel(g_connStr, grpc::InsecureChannelCredentials());
+    }
+    if (dpfs_channel == nullptr) {
         cerr << "Failed to create gRPC channel" << endl;
-        dlog->log_error("Failed to create gRPC channel\n");
+        dlog->log_error("Failed to create gRPC channel\\n");
         genResponseReturn(500, "Connect to db error", response);
         return 500;
+    }
+    // 初始化连接池（首次）
+    if (!dpfs_pool) {
+        dpfs_pool = std::make_unique<DpfsConnectionPool>(dpfs_channel, 100);
     }
 
     this->user_tokens_mutex.lock();
@@ -435,23 +535,17 @@ int CSystem::login(const std::string& request, std::string& response) {
     ++usr_token;
     this->user_tokens_mutex.unlock();
 
-    // 创建 DPFS gRPC 客户端
-    session->client = std::make_shared<CGrpcCli>(channel);
-    CGrpcCli& client = *session->client;
-    rc = client.login("root", "root");
-    if (rc != 0) {
-        cout << "DPFS login failed for user: " << username << ", error code: " << rc << endl;
-        dlog->log_error("DPFS login failed for user: %s, error code: %d\n", username.c_str(), rc);
-        cout << "Error message: \n" << client.msg << endl;
-        // 移除失败的 session
+    // 从连接池获取预认证的 dpfs 客户端
+    session->client = dpfs_pool->acquire();
+    if (!session->client) {
         this->user_tokens_mutex.lock();
         user_tokens.erase(token);
         this->user_tokens_mutex.unlock();
-        genResponseReturn(500, "DPFS login failed: " + client.msg, response);
+        genResponseReturn(500, "DPFS connection pool exhausted", response);
         return 500;
     }
     cout << "Login successful for user: " << username << " (role: " << dbRole << ")" << endl;
-    dlog->log_inf("Login successful: %s (role: %s)\n", username.c_str(), dbRole.c_str());
+    dlog->log_inf("Login successful: %s (role: %s)\\n", username.c_str(), dbRole.c_str());
 
     // ─── 4. 更新最后登录时间（ODBC） ───
     {
@@ -539,21 +633,18 @@ int CSystem::logout(const std::string& request, std::string& response) {
     std::string username = it->second->username;
     std::string role     = it->second->role;
     int64_t uid          = it->second->uid;
-    CGrpcCli& client = *it->second->client;
-    rc = client.logoff();
-    if (rc == 0) {
-        genResponseReturn(200, "Logoff successful", response);
-        // 审计日志
-        writeAuditLog(uid, username, role, "logout", "/api/logout", "", "success");
-        user_tokens.erase(it);
-    } else {
-        genResponseReturn(rc, client.msg, response);
-        writeAuditLog(uid, username, role, "logout", "/api/logout", "", "failure", client.msg);
-        user_tokens.erase(it);
+
+    // 将 dpfs 连接归还连接池（不再调用 logoff，避免 CUser 析构链问题）
+    if (it->second->client && dpfs_pool) {
+        dpfs_pool->release(it->second->client);
     }
+
+    genResponseReturn(200, "Logoff successful", response);
+    writeAuditLog(uid, username, role, "logout", "/api/logout", "", "success");
+    user_tokens.erase(it);
     this->user_tokens_mutex.unlock();
 
-    return rc;
+    return 0;
 }
 
 // ============================================================================
@@ -1212,6 +1303,51 @@ int CSystem::recursiveTrace(const std::string& trace_code, CGrpcCli& client, std
 }
 
 // ============================================================================
+// sanitizeUtf8 — 去除非法 UTF-8 字节，保留合法字符
+// 用于清洗从数据库读取的文本，防止截断或多编码导致的非法字节被发送到 API
+// ============================================================================
+static std::string sanitizeUtf8(const std::string& input) {
+    std::string result;
+    result.reserve(input.size());
+    size_t i = 0;
+    while (i < input.size()) {
+        uint8_t c = static_cast<uint8_t>(input[i]);
+        int len = 0;
+        if (c <= 0x7F) {
+            len = 1;                      // ASCII
+        } else if ((c & 0xE0) == 0xC0) {
+            len = 2;                      // 2-byte sequence
+        } else if ((c & 0xF0) == 0xE0) {
+            len = 3;                      // 3-byte sequence (most CJK)
+        } else if ((c & 0xF8) == 0xF0) {
+            len = 4;                      // 4-byte sequence
+        } else {
+            // 非法起始字节，跳过
+            ++i;
+            continue;
+        }
+        // 检查是否有足够字节 + 后续字节是否合法 (10xxxxxx)
+        if (i + len > input.size()) {
+            break; // 不够字节，截断到末尾
+        }
+        bool valid = true;
+        for (int j = 1; j < len; ++j) {
+            if ((static_cast<uint8_t>(input[i + j]) & 0xC0) != 0x80) {
+                valid = false;
+                break;
+            }
+        }
+        if (valid) {
+            result.append(input, i, len);
+            i += len;
+        } else {
+            ++i; // 跳过非法起始字节
+        }
+    }
+    return result;
+}
+
+// ============================================================================
 // getUserDescription — 从 MySQL 读取用户的 description 字段
 // ============================================================================
 std::string CSystem::getUserDescription(int64_t uid) {
@@ -1254,11 +1390,11 @@ std::string CSystem::getUserDescription(int64_t uid) {
     ret = SQLExecDirect(stmt, (SQLCHAR*)sql, SQL_NTS);
     if (ret == SQL_SUCCESS || ret == SQL_SUCCESS_WITH_INFO) {
         if (SQLFetch(stmt) == SQL_SUCCESS) {
-            char buf[2048] = {0};
+            char buf[65536] = {0};
             SQLLEN ind = 0;
             SQLGetData(stmt, 1, SQL_C_CHAR, buf, sizeof(buf), &ind);
             if (ind != SQL_NULL_DATA) {
-                description = std::string(buf);
+                description = sanitizeUtf8(std::string(buf));
             }
         }
     }
@@ -1625,9 +1761,9 @@ int CSystem::traceBack(const std::string& request, std::string& response) {
             // 将 system prompt 和 patient description 合并为单条 user 消息
             std::string combinedInput = g_aiPromptTemplate4extract + "\n\n" + userDesc;
             std::string extractedSymptoms = eclient.ChatSync(combinedInput);
-            cout << "[AI Food Risk] Extracted symptoms: " << extractedSymptoms.substr(0, 500) << endl;
+            cout << "[AI Food Risk] Extracted symptoms: " << extractedSymptoms << endl;
             dlog->log_inf("[AI Food Risk] Extracted symptoms length=%zu\n", extractedSymptoms.size());
-            dlog->log_inf("[AI Food Risk] Extracted symptoms content: %.500s\n", extractedSymptoms.c_str());
+            dlog->log_inf("[AI Food Risk] Extracted symptoms content: %s\n", extractedSymptoms.c_str());
 
             // Step 2: 合并患者症状 + 溯源原料信息，构造食品风险评估输入
             std::string foodRiskInput;
@@ -2238,6 +2374,7 @@ int CSystem::getUserInfo(const std::string& request, std::string& response) {
             return 401;
         }
         session = it->second.get();
+        it->second->touch();
     }
 
     // 从 MySQL 查询完整用户信息
@@ -2370,6 +2507,7 @@ int CSystem::updatePassword(const std::string& request, std::string& response) {
             return 401;
         }
         session = it->second.get();
+        it->second->touch();
     }
 
     int uid = session->uid;
@@ -2475,6 +2613,7 @@ int CSystem::updateUserInfo(const std::string& request, std::string& response) {
             return 401;
         }
         session = it->second.get();
+        it->second->touch();
     }
 
     int uid = session->uid;
@@ -2657,10 +2796,10 @@ int CSystem::registerUser(const std::string& request, std::string& response) {
     // 输入校验
     if (username.empty()) {
         genResponseReturn(400, "Username must not be empty", response);
-    if (username.length() > 64) {
-        genResponseReturn(400, "Username too long (max 64 characters)", response);
         return 400;
     }
+    if (username.length() > 64) {
+        genResponseReturn(400, "Username too long (max 64 characters)", response);
         return 400;
     }
     if (password.empty()) {
@@ -2669,15 +2808,17 @@ int CSystem::registerUser(const std::string& request, std::string& response) {
     }
     if (password.length() < 6) {
         genResponseReturn(400, "Password must be at least 6 characters", response);
-    if (password.length() > 128) {
-        genResponseReturn(400, "Password too long (max 128 characters)", response);
         return 400;
     }
+    if (password.length() > 128) {
+        genResponseReturn(400, "Password too long (max 128 characters)", response);
         return 400;
     }
     // 合法角色列表（仅允许消费者和生产商注册）
     if (role != "manufacturer" && role != "consumer") {
         genResponseReturn(400, "Invalid role. Must be one of: consumer, manufacturer", response);
+        return 400;
+    }
     if (realName.length() > 128) {
         genResponseReturn(400, "real_name too long (max 128 characters)", response);
         return 400;
@@ -2692,8 +2833,6 @@ int CSystem::registerUser(const std::string& request, std::string& response) {
     }
     if (mail.length() > 128) {
         genResponseReturn(400, "mail too long (max 128 characters)", response);
-        return 400;
-    }
         return 400;
     }
 
@@ -2737,7 +2876,7 @@ int CSystem::registerUser(const std::string& request, std::string& response) {
     }
 
     // 检查用户名是否已存在
-    std::string sql = "SELECT id FROM users WHERE name = '" + username + "'";
+    std::string sql = "SELECT id FROM users WHERE name = '" + sqlEscape(username) + "'";
     ret = SQLExecDirect(stmt, (SQLCHAR*)sql.c_str(), SQL_NTS);
     if (ret == SQL_SUCCESS || ret == SQL_SUCCESS_WITH_INFO) {
         if (SQLFetch(stmt) == SQL_SUCCESS) {
@@ -2761,20 +2900,10 @@ int CSystem::registerUser(const std::string& request, std::string& response) {
         return 500;
     }
 
-    // 转义单引号
-    auto esc = [](const std::string& s) -> std::string {
-        std::string r;
-        for (char c : s) {
-            r += c;
-            if (c == '\'') r += '\'';
-        }
-        return r;
-    };
-
     sql = "INSERT INTO users (name, role, passwd, real_name, description, phone, mail, status) "
-          "VALUES ('" + esc(username) + "', '" + esc(role) + "', '" + esc(password) + "', '" +
-          esc(realName) + "', '" + esc(description) + "', '" + esc(phone) + "', '" +
-          esc(mail) + "', 'active')";
+          "VALUES ('" + sqlEscape(username) + "', '" + sqlEscape(role) + "', '" + sqlEscape(password) + "', '" +
+          sqlEscape(realName) + "', '" + sqlEscape(description) + "', '" + sqlEscape(phone) + "', '" +
+          sqlEscape(mail) + "', 'active')";
 
     ret = SQLExecDirect(stmt, (SQLCHAR*)sql.c_str(), SQL_NTS);
     if (ret != SQL_SUCCESS && ret != SQL_SUCCESS_WITH_INFO) {
@@ -2797,6 +2926,45 @@ int CSystem::registerUser(const std::string& request, std::string& response) {
 
     // 审计日志 (uid=0 因为是新用户，尚未登录)
     writeAuditLog(0, username, role, "register", "/api/register", "", "success");
+
+    // ─── 同步新用户到 dpfs SYSUSERS 表 ───
+    {
+        if (dpfs_pool) {
+            try {
+                PoolGuard guard(*dpfs_pool, dpfs_pool->acquire());
+                if (guard.client) {
+                    // 获取当前时间戳
+                    auto now = std::chrono::system_clock::now();
+                    auto now_c = std::chrono::system_clock::to_time_t(now);
+                    struct tm tm_buf;
+                    localtime_r(&now_c, &tm_buf);
+                    char tsBuf[64];
+                    strftime(tsBuf, sizeof(tsBuf), "%Y-%m-%d %H:%M:%S", &tm_buf);
+                    std::string timestamp(tsBuf);
+
+                    // DBPRIVILEGE=1 (ACCESS), USERID=0 (AUTO_INC)
+                    std::string insertSql = "INSERT INTO SYSDPFS.SYSUSERS VALUES ('" +
+                        sqlEscape(username) + "', 1, '" + timestamp + "', '" + timestamp + "', '" +
+                        sqlEscape(password) + "', 0)";
+                    int dpfsRc = guard.client->execSQL(insertSql);
+                    if (dpfsRc != 0) {
+                        dlog->log_error("Failed to sync user '%s' to dpfs SYSUSERS: %s\n",
+                                        username.c_str(), guard.client->msg.c_str());
+                        cerr << "Warning: user registered in MySQL but dpfs SYSUSERS sync failed: " << guard.client->msg << endl;
+                    } else {
+                        dlog->log_inf("User '%s' synced to dpfs SYSUSERS\n", username.c_str());
+                    }
+                    // guard 析构时自动归还连接
+                } else {
+                    dlog->log_error("dpfs pool acquire failed during user registration sync\n");
+                }
+            } catch (const std::exception& e) {
+                dlog->log_error("Exception during dpfs SYSUSERS sync: %s\n", e.what());
+            }
+        } else {
+            dlog->log_error("dpfs pool not available for SYSUSERS sync\n");
+        }
+    }
 
     genResponseReturn(200, "Registration successful", response);
     return 0;
@@ -2842,6 +3010,7 @@ int CSystem::uploadFile(const std::string& request, std::string& response) {
             genResponseReturn(401, "Invalid token", response);
             return 401;
         }
+        it->second->touch();
     }
 
     std::string schema = doc["schema"].GetString();
@@ -2944,6 +3113,7 @@ int CSystem::listFiles(const std::string& request, std::string& response) {
             genResponseReturn(401, "Invalid token", response);
             return 401;
         }
+        it->second->touch();
         clientPtr = it->second->client;
     }
 
@@ -3091,6 +3261,7 @@ int CSystem::monitor(const std::string& request, std::string& response) {
             return 401;
         }
         session = it->second.get();
+        it->second->touch();
     }
 
     rapidjson::Document retDoc;
@@ -3340,6 +3511,7 @@ int CSystem::getLogs(const std::string& request, std::string& response) {
             genResponseReturn(401, "Invalid user token", response);
             return 401;
         }
+        it->second->touch();
     }
 
     int maxLines = 50;
