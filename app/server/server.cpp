@@ -225,6 +225,52 @@ int main(int argc, char* argv[]) {
             return res;
         });
 
+    // ─── 用户管理（管理员专用）───
+    CROW_ROUTE(app, "/api/admin/users/list")
+        .methods("POST"_method)([](const crow::request& req) {
+            int rc = 0;
+            std::string msg = "";
+            rc = sys->adminListUsers(req.body, msg);
+            auto res = crow::response(200, msg);
+            return res;
+        });
+
+    CROW_ROUTE(app, "/api/admin/users/create")
+        .methods("POST"_method)([](const crow::request& req) {
+            int rc = 0;
+            std::string msg = "";
+            rc = sys->adminCreateUser(req.body, msg);
+            auto res = crow::response(200, msg);
+            return res;
+        });
+
+    CROW_ROUTE(app, "/api/admin/users/update")
+        .methods("POST"_method)([](const crow::request& req) {
+            int rc = 0;
+            std::string msg = "";
+            rc = sys->adminUpdateUser(req.body, msg);
+            auto res = crow::response(200, msg);
+            return res;
+        });
+
+    CROW_ROUTE(app, "/api/admin/users/delete")
+        .methods("POST"_method)([](const crow::request& req) {
+            int rc = 0;
+            std::string msg = "";
+            rc = sys->adminDeleteUser(req.body, msg);
+            auto res = crow::response(200, msg);
+            return res;
+        });
+
+    CROW_ROUTE(app, "/api/admin/users/reset_password")
+        .methods("POST"_method)([](const crow::request& req) {
+            int rc = 0;
+            std::string msg = "";
+            rc = sys->adminResetPassword(req.body, msg);
+            auto res = crow::response(200, msg);
+            return res;
+        });
+
     // 提供文件访问：GET /api/serve_file?path=...
     CROW_ROUTE(app, "/api/serve_file")
         .methods("GET"_method)([](const crow::request& req) {
@@ -362,15 +408,16 @@ int main(int argc, char* argv[]) {
 
 void Args_Error()
 {
-    cout << "\tThe args begin with:\n" <<
-        "\t--ak              [ai api key]\n" <<
-        "\t--connStr         [dpfs server connection string]\n" <<
-        "\t--mysqlHost       [MySQL host, default 127.0.0.1]\n" <<
-        "\t--mysqlPort       [MySQL port, default 3306]\n" <<
-        "\t--mysqlUser       [MySQL user, default root]\n" <<
-        "\t--mysqlPasswd     [MySQL password]\n" <<
-        "\t--mysqlDatabase   [MySQL database, default dpfs]\n" << endl;
-
+    cout << "    The args begin with:\n" <<
+        "--ak              [ai api key]\n" <<
+        "--connStr         [dpfs server connection string]\n" <<
+        "--agentKey        [dpfs-agent API key]\n" <<
+        "--agentUrl        [dpfs-agent URL, default http://127.0.0.1:20564]\n" <<
+        "--mysqlHost       [MySQL host, default 127.0.0.1]\n" <<
+        "--mysqlPort       [MySQL port, default 3306]\n" <<
+        "--mysqlUser       [MySQL user, default root]\n" <<
+        "--mysqlPasswd     [MySQL password]\n" <<
+        "--mysqlDatabase   [MySQL database, default dpfs]\n" << endl;
 }
 
 
@@ -398,6 +445,12 @@ void Analy_Input(int argc, char** argv) {
 
         if (Input[i] == "--ak") {
             initInfo.apiKey = Input[i + 1];
+            i += 2;
+        } else if (Input[i] == "--agentKey") {
+            initInfo.agentKey = Input[i + 1];
+            i += 2;
+        } else if (Input[i] == "--agentUrl") {
+            initInfo.agentUrl = Input[i + 1];
             i += 2;
         } else if (Input[i] == "--connStr") {
             initInfo.connStr = Input[i + 1];

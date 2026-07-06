@@ -30,6 +30,9 @@ struct initSystemInfo {
     std::string systemVersion;
     std::string apiKey;
     std::string connStr;
+    // dpfs-agent 配置
+    std::string agentUrl = "http://127.0.0.1:20564";
+    std::string agentKey = "";
     // MySQL RBAC 连接参数
     std::string mysqlHost     = "127.0.0.1";
     int         mysqlPort     = 3306;
@@ -107,6 +110,13 @@ public:
 
     // 系统日志：返回 dserver.log 最近 N 行
     int getLogs(const std::string& request, std::string& response);
+
+    // ─── 用户管理（管理员专用）───
+    int adminListUsers(const std::string& request, std::string& response);
+    int adminCreateUser(const std::string& request, std::string& response);
+    int adminUpdateUser(const std::string& request, std::string& response);
+    int adminDeleteUser(const std::string& request, std::string& response);
+    int adminResetPassword(const std::string& request, std::string& response);
 
 private:
 
