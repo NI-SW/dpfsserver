@@ -39,6 +39,10 @@ struct initSystemInfo {
     std::string mysqlUser     = "root";
     std::string mysqlPasswd   = "";
     std::string mysqlDatabase = "dpfs";
+    // 文件存储路径（默认相对于 dserver 可执行文件目录）
+    std::string uploadDir     = "./uploads";
+    std::string staticDir     = "./static";
+    std::string logDir        = "./";
 };
 
 struct UserSession {

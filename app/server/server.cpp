@@ -281,7 +281,9 @@ int main(int argc, char* argv[]) {
             std::string filePath(pathIt);
 
             // 安全检查：只允许访问 uploads 目录
-            if (filePath.find("/home/dpfs/github/dpfsserver/uploads/") != 0 || filePath.find("..") != std::string::npos) {
+            std::string allowedPrefix = initInfo.uploadDir;
+            if (!allowedPrefix.empty() && allowedPrefix.back() != '/') allowedPrefix += '/';
+            if (filePath.find(allowedPrefix) != 0 || filePath.find("..") != std::string::npos) {
                 return crow::response(403, "Access denied");
             }
 
@@ -346,7 +348,9 @@ int main(int argc, char* argv[]) {
     // Serve index.html for root route (SPA entry point)
     CROW_ROUTE(app, "/")
         .methods("GET"_method)([]() {
-            std::string indexPath = "/home/dpfs/github/dpfsserver/app/server/static/index.html";
+            std::string indexPath = initInfo.staticDir;
+            if (!indexPath.empty() && indexPath.back() != '/') indexPath += '/';
+            indexPath += "index.html";
             std::ifstream file(indexPath, std::ios::binary);
             if (!file.is_open()) {
                 return crow::response(200, "Frontend not deployed");
@@ -363,11 +367,13 @@ int main(int argc, char* argv[]) {
         .methods("GET"_method)([](std::string filename) {
             // Don't intercept API routes
             if (filename.find("api") == 0) return crow::response(200);
-            std::string filePath = "/home/dpfs/github/dpfsserver/app/server/static/" + filename;
+            std::string staticBase = initInfo.staticDir;
+            if (!staticBase.empty() && staticBase.back() != '/') staticBase += '/';
+            std::string filePath = staticBase + filename;
             std::ifstream file(filePath, std::ios::binary);
             if (!file.is_open()) {
                 // Fallback to index.html for SPA client-side routing
-                std::string indexPath = "/home/dpfs/github/dpfsserver/app/server/static/index.html";
+                std::string indexPath = staticBase + "index.html";
                 std::ifstream indexFile(indexPath, std::ios::binary);
                 if (!indexFile.is_open()) {
                     return crow::response(200, "File not found");
@@ -417,7 +423,10 @@ void Args_Error()
         "--mysqlPort       [MySQL port, default 3306]\n" <<
         "--mysqlUser       [MySQL user, default root]\n" <<
         "--mysqlPasswd     [MySQL password]\n" <<
-        "--mysqlDatabase   [MySQL database, default dpfs]\n" << endl;
+        "--mysqlDatabase   [MySQL database, default dpfs]\n" <<
+        "--uploadDir       [uploaded files dir, default ./uploads]\n" <<
+        "--staticDir       [frontend static dir, default ./static]\n" <<
+        "--logDir          [log output dir, default ./]\n" << endl;
 }
 
 
@@ -469,6 +478,15 @@ void Analy_Input(int argc, char** argv) {
             i += 2;
         } else if (Input[i] == "--mysqlDatabase") {
             initInfo.mysqlDatabase = Input[i + 1];
+            i += 2;
+        } else if (Input[i] == "--uploadDir") {
+            initInfo.uploadDir = Input[i + 1];
+            i += 2;
+        } else if (Input[i] == "--staticDir") {
+            initInfo.staticDir = Input[i + 1];
+            i += 2;
+        } else if (Input[i] == "--logDir") {
+            initInfo.logDir = Input[i + 1];
             i += 2;
         } else {
             cout << "missing args,exit" << endl;

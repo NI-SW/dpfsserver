@@ -10,7 +10,7 @@ include $(DPFS_ROOT_DIR)/mk/dpfs.common.mk
 
 CXXFLAG += -g
 CXXHEADER += -I$(DPFS_ROOT_DIR)/thirdparty/dpfs/include
-CXXLIB += -L$(DPFS_ROOT_DIR)/thirdparty/dpfs/lib -lodbc
+CXXLIB += -L$(DPFS_ROOT_DIR)/thirdparty/dpfs/lib -lodbc -lcrypto
 
 LIB := $(DPFS_ROOT_DIR)/lib/libdcsys.so
 

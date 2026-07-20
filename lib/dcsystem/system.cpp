@@ -8,10 +8,13 @@
 #include <extractmodel/extract.hpp>
 #include <fstream>
 #include <log/logbinary.h>
+#include <openssl/evp.h>
+#include <openssl/rand.h>
+#include <iomanip>
+#include <sstream>
 
 // 全局日志实例
 extern logrecord* dlog;
-#include <sstream>
 #include <sql.h>
 #include <sqlext.h>
 #include <cstring>
@@ -25,6 +28,117 @@ extern logrecord* dlog;
 #include <chrono>
 #include <sys/statvfs.h>
 #include "rapidjson/prettywriter.h"
+
+// ============================================================================
+// 密码哈希工具（SHA-256 + salt）
+// 存储格式: $sha256$<salt_hex>$<hash_hex>
+// 兼容: 不以 "$sha256$" 开头的字符串视为明文（用于迁移期旧数据）
+// ============================================================================
+namespace passwd_hash {
+
+static const char* kPrefix = "$sha256$";
+static const size_t kSaltLen = 16;      // 16 字节 salt
+static const size_t kHashLen = 32;      // SHA-256 输出 32 字节
+
+// 字节数组转小写 hex 字符串
+static std::string toHex(const unsigned char* data, size_t len) {
+    std::ostringstream oss;
+    oss << std::hex << std::setfill('0');
+    for (size_t i = 0; i < len; ++i) {
+        oss << std::setw(2) << static_cast<unsigned int>(data[i]);
+    }
+    return oss.str();
+}
+
+// hex 字符转 nibble，失败返回 -1
+static int hexVal(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+// hex 字符串转字节数组，失败返回 false
+static bool fromHex(const std::string& hex, unsigned char* out, size_t outLen) {
+    if (hex.size() != outLen * 2) return false;
+    for (size_t i = 0; i < outLen; ++i) {
+        int hi = hexVal(hex[2 * i]);
+        int lo = hexVal(hex[2 * i + 1]);
+        if (hi < 0 || lo < 0) return false;
+        out[i] = static_cast<unsigned char>((hi << 4) | lo);
+    }
+    return true;
+}
+
+// 生成随机 salt，返回 hex 字符串
+static std::string generateSalt() {
+    unsigned char buf[kSaltLen];
+    if (RAND_bytes(buf, kSaltLen) != 1) {
+        // 随机源失败时退化为时间+地址混合（仅作为兜底，不应触发）
+        auto now = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+        std::ostringstream oss;
+        oss << std::hex << now << reinterpret_cast<uintptr_t>(&buf);
+        std::string s = oss.str();
+        s.resize(kSaltLen * 2, '0');
+        return s;
+    }
+    return toHex(buf, kSaltLen);
+}
+
+// 计算 SHA-256(salt || password)，输出 hex
+static std::string sha256Hex(const std::string& saltHex, const std::string& password) {
+    unsigned char salt[kSaltLen];
+    if (!fromHex(saltHex, salt, kSaltLen)) return "";
+
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    if (!ctx) return "";
+    unsigned char digest[kHashLen];
+    unsigned int digestLen = 0;
+    bool ok = (EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr) == 1)
+           && (EVP_DigestUpdate(ctx, salt, kSaltLen) == 1)
+           && (EVP_DigestUpdate(ctx, password.data(), password.size()) == 1)
+           && (EVP_DigestFinal_ex(ctx, digest, &digestLen) == 1);
+    EVP_MD_CTX_free(ctx);
+    if (!ok || digestLen != kHashLen) return "";
+    return toHex(digest, kHashLen);
+}
+
+// 生成完整的存储格式: $sha256$<salt_hex>$<hash_hex>
+static std::string hash(const std::string& password) {
+    std::string salt = generateSalt();
+    std::string h = sha256Hex(salt, password);
+    if (h.empty()) return "";
+    return std::string(kPrefix) + salt + "$" + h;
+}
+
+// 判断存储串是否为哈希格式
+static bool isHashed(const std::string& stored) {
+    return stored.rfind(kPrefix, 0) == 0;
+}
+
+// 校验密码: stored 可以是 $sha256$ 格式，也可以是明文（迁移期兼容）
+static bool verify(const std::string& password, const std::string& stored) {
+    if (!isHashed(stored)) {
+        return stored == password;  // 旧格式，明文比对
+    }
+    // 解析 $sha256$<salt>$<hash>
+    size_t p1 = stored.find('$', 1);            // 跳过 $
+    if (p1 == std::string::npos) return false;
+    size_t p2 = stored.find('$', p1 + 1);
+    if (p2 == std::string::npos) return false;
+    std::string saltHex = stored.substr(p1 + 1, p2 - p1 - 1);
+    std::string hashHex = stored.substr(p2 + 1);
+    std::string computed = sha256Hex(saltHex, password);
+    if (computed.empty() || computed.size() != hashHex.size()) return false;
+    // 常数时间比对（避免时序侧信道）
+    unsigned char diff = 0;
+    for (size_t i = 0; i < computed.size(); ++i) {
+        diff |= static_cast<unsigned char>(computed[i] ^ hashHex[i]);
+    }
+    return diff == 0;
+}
+
+} // namespace passwd_hash
 
 #define __SERVER_DEBUG__
 
@@ -56,6 +170,11 @@ std::string g_aiPromptTemplate4extract = "";    // extractmodel 症状提取提�
 std::string g_aiPromptTemplate4foodrisk = "";   // DeepSeek 食品风险评估报告提示词
 std::string g_agentUrl = "http://127.0.0.1:20564";
 std::string g_agentKey = "";
+
+// 文件路径配置（从 initSystemInfo 传入）
+std::string g_uploadDir = "./uploads";
+std::string g_staticDir = "./static";
+std::string g_logDir    = "./";
 
 // 全局日志实例
 logrecord* dlog = nullptr;
@@ -105,11 +224,19 @@ int CSystem::init(const initSystemInfo& initInfo) {
     g_mysqlPasswd   = initInfo.mysqlPasswd;
     g_mysqlDatabase = initInfo.mysqlDatabase;
 
+    // 文件路径配置
+    g_uploadDir = initInfo.uploadDir.empty() ? "./uploads" : initInfo.uploadDir;
+    g_staticDir = initInfo.staticDir.empty() ? "./static" : initInfo.staticDir;
+    g_logDir    = initInfo.logDir.empty()    ? "./"       : initInfo.logDir;
+
     // 初始化日志模块
     if (!dlog) {
         dlog = new logrecord();
     }
-    dlog->set_log_path("/home/dpfs/github/dpfsserver/app/server/dserver.log");
+    std::string logPath = g_logDir;
+    if (!logPath.empty() && logPath.back() != '/') logPath += '/';
+    logPath += "dserver.log";
+    dlog->set_log_path(logPath);
     dlog->set_loglevel(logrecord::LOG_INFO);
 
     std::fstream promptFile("prompt", std::ios::in);
@@ -489,8 +616,8 @@ int CSystem::login(const std::string& request, std::string& response) {
         }
     }
 
-    // 校验密码
-    if (dbPasswd != password) {
+    // 校验密码（支持 $sha256$ 哈希格式与明文格式的迁移期兼容）
+    if (!passwd_hash::verify(password, dbPasswd)) {
         dlog->log_notic("[WARN] Login failed: invalid password for user '%s'\n", username.c_str());
         writeAuditLog(dbUid, username, dbRole, "login", "/api/login", "",
                       "failure", "Invalid password");
@@ -541,12 +668,17 @@ int CSystem::login(const std::string& request, std::string& response) {
     this->user_tokens_mutex.unlock();
 
     // 从连接池获取预认证的 dpfs 客户端
-    session->client = dpfs_pool->acquire();
+    AcquireError acqErr;
+    session->client = dpfs_pool->acquire(&acqErr);
     if (!session->client) {
         this->user_tokens_mutex.lock();
         user_tokens.erase(token);
         this->user_tokens_mutex.unlock();
-        genResponseReturn(500, "DPFS connection pool exhausted", response);
+        if (acqErr == AcquireError::PoolExhausted) {
+            genResponseReturn(500, "DPFS connection pool exhausted", response);
+        } else {
+            genResponseReturn(500, "DPFS backend unavailable", response);
+        }
         return 500;
     }
     cout << "Login successful for user: " << username << " (role: " << dbRole << ")" << endl;
@@ -728,30 +860,89 @@ trace_pros                | Array of Objects                   | 溯源结构列
         return 400;
     }
 
+    // 可选：按产品名过滤（使用 NAME 索引精确查询）
+    bool filterByName = doc.HasMember("name") && doc["name"].IsString();
+    std::string filterName;
+    if (filterByName) {
+        filterName = doc["name"].GetString();
+        if (filterName.empty()) {
+            filterByName = false;
+        }
+    }
+
     rc = client.getTableHandle("SYSDPFS", "SYSTRACEABLES"); 
     if (rc != 0) {
         genResponseReturn(rc, client.msg, response);
         return rc;
     }
 
-    std::vector<std::string> idxCol;
-    idxCol.emplace_back();
-    idxCol[0].resize(8);
-    memcpy(const_cast<char*>(idxCol[0].data()), &begin, sizeof(begin));
     IDXHANDLE hidx = 0;
 
-    rc = client.getIdxIter({"TID"}, idxCol, hidx);
-    if (rc != 0) {
-        if (rc == ENOENT) {
-            genResponseReturn(0, "No more traceable products", response);
-            return 0;
+    if (filterByName) {
+        // 使用 NAME 索引精确查询
+        // NAME 是 TYPE_CHAR(64)，需要填充到 64 字节
+        std::string nameKey(64, '\0');
+        size_t copyLen = std::min(filterName.size(), (size_t)64);
+        memcpy(&nameKey[0], filterName.data(), copyLen);
+
+        rc = client.getIdxIter({"NAME"}, {nameKey}, hidx);
+        if (rc != 0) {
+            if (rc == ENOENT) {
+                // NAME 不存在，返回空结果
+                client.releaseTableHandle();
+                rapidjson::Document docRet;
+                docRet.SetObject();
+                auto& allocator = docRet.GetAllocator();
+                docRet.AddMember("total", 0, allocator);
+                docRet.AddMember("trace_pros", rapidjson::Value(rapidjson::kArrayType), allocator);
+                docRet.AddMember("code", 200, allocator);
+                docRet.AddMember("message", "No matching product", allocator);
+                rapidjson::StringBuffer buffer;
+                rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+                docRet.Accept(writer);
+                response = buffer.GetString();
+                return 0;
+            }
+            genResponseReturn(rc, client.msg, response);
+            return rc;
         }
-        genResponseReturn(rc, client.msg, response);
-        return rc;
+    } else {
+        // 无过滤：使用 TID 索引分页迭代
+        std::vector<std::string> idxCol;
+        idxCol.emplace_back();
+        idxCol[0].resize(8);
+        memcpy(const_cast<char*>(idxCol[0].data()), &begin, sizeof(begin));
+
+        rc = client.getIdxIter({"TID"}, idxCol, hidx);
+        if (rc != 0) {
+            if (rc == ENOENT) {
+                genResponseReturn(0, "No more traceable products", response);
+                return 0;
+            }
+            genResponseReturn(rc, client.msg, response);
+            return rc;
+        }
     }
 
     rc = client.fetchNextRow(hidx);
     if (rc != 0) {
+        if (filterByName) {
+            // NAME 索引查询无匹配结果，返回空列表
+            rc = client.releaseIdxIter(hidx);
+            client.releaseTableHandle();
+            rapidjson::Document docRet;
+            docRet.SetObject();
+            auto& allocator = docRet.GetAllocator();
+            docRet.AddMember("total", 0, allocator);
+            docRet.AddMember("trace_pros", rapidjson::Value(rapidjson::kArrayType), allocator);
+            docRet.AddMember("code", 200, allocator);
+            docRet.AddMember("message", "No matching product", allocator);
+            rapidjson::StringBuffer buffer;
+            rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+            docRet.Accept(writer);
+            response = buffer.GetString();
+            return 0;
+        }
         if (rc == ENOENT) {
             genResponseReturn(0, "No more traceable products", response);
             return 0;
@@ -773,6 +964,8 @@ trace_pros                | Array of Objects                   | 溯源结构列
     rapidjson::Value traceProArr(rapidjson::kArrayType);
     for (int i = 0; i < limit; ++i) {
         if (rc != 0) {
+            // fetchNextRow 返回非零：无更多数据
+            rc = 0;
             break;
         }
 
@@ -799,18 +992,19 @@ trace_pros                | Array of Objects                   | 溯源结构列
         }
         std::string group_name(gval);
 
-        /*
-        {
-            code: 0 ,
-            message : "",
-            total: 128,
-            trace_pros : [
-                {"group_name":"北京林业大学",product_name:"苹果派","trace_code_prefix":"00000000000000001D05000000000000"},
-                {"group_name":"北京林业大学",product_name:"香蕉派","trace_code_prefix":"00000000000000001D09000000000000"},
-                {"group_name":"北京林业大学",product_name:"草莓派","trace_code_prefix":"00000000000000001D01000000000000"}
-            ]
+        // filterByName 模式：前缀匹配，B+树有序，遇到不匹配即停止
+        if (filterByName) {
+            // 去除尾部 \0 比较
+            std::string pnTrimmed = product_name;
+            size_t pnEnd = pnTrimmed.find('\0');
+            if (pnEnd != std::string::npos) pnTrimmed = pnTrimmed.substr(0, pnEnd);
+            if (pnTrimmed.size() < filterName.size() ||
+                memcmp(pnTrimmed.data(), filterName.data(), filterName.size()) != 0) {
+                // 前缀不匹配，B+树有序，后续也不会匹配
+                rc = 0;
+                break;
+            }
         }
-        */
         
         rapidjson::Value traceProObj(rapidjson::kObjectType);
         traceProObj.AddMember("group_name", rapidjson::Value(group_name.c_str(), allocator), allocator);
@@ -819,8 +1013,15 @@ trace_pros                | Array of Objects                   | 溯源结构列
         traceProArr.PushBack(traceProObj, allocator);
         ++total;
 
+        // filterByName 模式下继续迭代，直到前缀不匹配或达到 limit
+        if (filterByName && (int)total >= limit) {
+            rc = 0;
+            break;
+        }
+
         rc = client.fetchNextRow(hidx);
         if (rc != 0) {
+            rc = 0;
             break;
         }
     }
@@ -838,10 +1039,12 @@ trace_pros                | Array of Objects                   | 溯源结构列
         return rc;
     }
 
-    // 修正 total：dpfs 迭代器按 begin+limit 分页时 total 不正确，
-    // 此处重新查询 begin=0 获取真实总数
+    // 修正 total：
+    // - filterByName 模式下 total 就是匹配到的行数（0 或 1，因为 NAME 是 UNIQUE）
+    // - 分页模式下 dpfs 迭代器按 begin+limit 分页时 total 不正确，
+    //   此处重新查询 begin=0 获取真实总数
     size_t trueTotal = total;
-    {
+    if (!filterByName) {
         rc = client.getTableHandle("SYSDPFS", "SYSTRACEABLES");
         if (rc == 0) {
             std::vector<std::string> cntCol;
@@ -2377,7 +2580,7 @@ int CSystem::getUserInfo(const std::string& request, std::string& response) {
         SQLHSTMT stmt = SQL_NULL_HANDLE;
         SQLRETURN ret;
         char colName[256], colRole[32], colStatus[32], colLastLogin[64], colCreatedAt[64];
-        char colRealName[256], colPhone[64], colMail[128], colDesc[1024];
+        char colRealName[256], colPhone[64], colMail[128], colDesc[65536];
         SQLLEN ind;
 
         ret = SQLAllocHandle(SQL_HANDLE_ENV, SQL_NULL_HANDLE, &env);
@@ -2531,8 +2734,8 @@ int CSystem::updatePassword(const std::string& request, std::string& response) {
                         }
                         SQLFreeHandle(SQL_HANDLE_STMT, stmt);
 
-                        // 校验旧密码
-                        if (std::string(colPasswd) != oldPasswd) {
+                        // 校验旧密码（支持哈希/明文兼容）
+                        if (!passwd_hash::verify(oldPasswd, std::string(colPasswd))) {
                             SQLDisconnect(dbc);
                             SQLFreeHandle(SQL_HANDLE_DBC, dbc);
                             SQLFreeHandle(SQL_HANDLE_ENV, env);
@@ -2542,16 +2745,18 @@ int CSystem::updatePassword(const std::string& request, std::string& response) {
                             return 403;
                         }
 
-                        // 更新新密码
+                        // 更新新密码（存储为 $sha256$ 哈希）
+                        std::string newPasswdHashed = passwd_hash::hash(newPasswd);
+                        if (newPasswdHashed.empty()) {
+                            SQLDisconnect(dbc);
+                            SQLFreeHandle(SQL_HANDLE_DBC, dbc);
+                            SQLFreeHandle(SQL_HANDLE_ENV, env);
+                            genResponseReturn(500, "Failed to hash password", response);
+                            return 500;
+                        }
                         ret = SQLAllocHandle(SQL_HANDLE_STMT, dbc, &stmt);
                         if (ret == SQL_SUCCESS || ret == SQL_SUCCESS_WITH_INFO) {
-                            // 防止 SQL 注入：简单转义单引号
-                            std::string safePasswd;
-                            for (char c : newPasswd) {
-                                if (c == '\'') safePasswd += "''";
-                                else safePasswd += c;
-                            }
-                            std::string updateSql = "UPDATE users SET passwd = '" + safePasswd + "' WHERE id = " + std::to_string(session->uid);
+                            std::string updateSql = "UPDATE users SET passwd = '" + sqlEscape(newPasswdHashed) + "' WHERE id = " + std::to_string(session->uid);
                             ret = SQLExecDirect(stmt, (SQLCHAR*)updateSql.c_str(), SQL_NTS);
                             SQLFreeHandle(SQL_HANDLE_STMT, stmt);
                         }
@@ -2642,8 +2847,10 @@ int CSystem::updateUserInfo(const std::string& request, std::string& response) {
     // SQL 注入防护：转义单引号
     auto escape = [](const std::string& s) -> std::string {
         std::string out;
+        out.reserve(s.size() + 8);
         for (char c : s) {
             if (c == '\'') out += "''";
+            else if (c == '\\') out += "\\\\";
             else out += c;
         }
         return out;
@@ -2891,8 +3098,19 @@ int CSystem::registerUser(const std::string& request, std::string& response) {
         return 500;
     }
 
+    // 将明文密码转为 $sha256$ 哈希存储
+    std::string passwordHashed = passwd_hash::hash(password);
+    if (passwordHashed.empty()) {
+        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        SQLDisconnect(dbc);
+        SQLFreeHandle(SQL_HANDLE_DBC, dbc);
+        SQLFreeHandle(SQL_HANDLE_ENV, env);
+        genResponseReturn(500, "Failed to hash password", response);
+        return 500;
+    }
+
     sql = "INSERT INTO users (name, role, passwd, real_name, description, phone, mail, status) "
-          "VALUES ('" + sqlEscape(username) + "', '" + sqlEscape(role) + "', '" + sqlEscape(password) + "', '" +
+          "VALUES ('" + sqlEscape(username) + "', '" + sqlEscape(role) + "', '" + sqlEscape(passwordHashed) + "', '" +
           sqlEscape(realName) + "', '" + sqlEscape(description) + "', '" + sqlEscape(phone) + "', '" +
           sqlEscape(mail) + "', 'active')";
 
@@ -2922,7 +3140,8 @@ int CSystem::registerUser(const std::string& request, std::string& response) {
     {
         if (dpfs_pool) {
             try {
-                PoolGuard guard(*dpfs_pool, dpfs_pool->acquire());
+                AcquireError acqErr;
+                PoolGuard guard(*dpfs_pool, dpfs_pool->acquire(&acqErr));
                 if (guard.client) {
                     // 获取当前时间戳
                     auto now = std::chrono::system_clock::now();
@@ -2947,7 +3166,11 @@ int CSystem::registerUser(const std::string& request, std::string& response) {
                     }
                     // guard 析构时自动归还连接
                 } else {
-                    dlog->log_error("dpfs pool acquire failed during user registration sync\n");
+                    if (acqErr == AcquireError::PoolExhausted) {
+                        dlog->log_error("dpfs pool exhausted during user registration sync\\n");
+                    } else {
+                        dlog->log_error("dpfs backend unavailable during user registration sync\\n");
+                    }
                 }
             } catch (const std::exception& e) {
                 dlog->log_error("Exception during dpfs SYSUSERS sync: %s\n", e.what());
@@ -3033,9 +3256,8 @@ int CSystem::uploadFile(const std::string& request, std::string& response) {
         return 400;
     }
 
-    // 构建目标路径: /home/dpfs/github/dpfsserver/uploads/<schema>/<product_name>/
-    std::string baseDir = "/home/dpfs/github/dpfsserver/uploads";
-    std::string dirPath = baseDir + "/" + schema + "/" + productName;
+    // 构建目标路径: <uploadDir>/<schema>/<product_name>/
+    std::string dirPath = g_uploadDir + "/" + schema + "/" + productName;
     std::string filePath = dirPath + "/" + fileName;
 
     // 创建目录
@@ -3120,8 +3342,8 @@ int CSystem::listFiles(const std::string& request, std::string& response) {
         return 400;
     }
 
-    std::string dirPath = "/home/dpfs/github/dpfsserver/uploads/" + schema + "/" + productName;
-    const std::string uploadsPrefix = "/home/dpfs/github/dpfsserver/uploads/";
+    std::string dirPath = g_uploadDir + "/" + schema + "/" + productName;
+    const std::string uploadsPrefix = g_uploadDir + "/";
 
     rapidjson::Document retDoc;
     retDoc.SetObject();
@@ -3828,8 +4050,18 @@ int CSystem::adminCreateUser(const std::string& request, std::string& response) 
         genResponseReturn(500, "Database error", response); return 500;
     }
 
+    // 将明文密码转为 $sha256$ 哈希存储
+    std::string passwordHashed = passwd_hash::hash(password);
+    if (passwordHashed.empty()) {
+        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        SQLDisconnect(dbc);
+        SQLFreeHandle(SQL_HANDLE_DBC, dbc);
+        SQLFreeHandle(SQL_HANDLE_ENV, env);
+        genResponseReturn(500, "Failed to hash password", response); return 500;
+    }
+
     sql = "INSERT INTO users (name, role, passwd, real_name, description, phone, mail, status) "
-          "VALUES ('" + sqlEscape(username) + "', '" + sqlEscape(role) + "', '" + sqlEscape(password) + "', '" +
+          "VALUES ('" + sqlEscape(username) + "', '" + sqlEscape(role) + "', '" + sqlEscape(passwordHashed) + "', '" +
           sqlEscape(realName) + "', '" + sqlEscape(description) + "', '" + sqlEscape(phone) + "', '" +
           sqlEscape(mail) + "', 'active')";
 
@@ -4180,7 +4412,16 @@ int CSystem::adminResetPassword(const std::string& request, std::string& respons
         genResponseReturn(500, "Database error", response); return 500;
     }
 
-    std::string updateSql = "UPDATE users SET passwd = '" + sqlEscape(newPasswd) + "' WHERE id = " + std::to_string(targetId);
+    // 将明文密码转为 $sha256$ 哈希存储
+    std::string newPasswdHashed = passwd_hash::hash(newPasswd);
+    if (newPasswdHashed.empty()) {
+        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        SQLDisconnect(dbc);
+        SQLFreeHandle(SQL_HANDLE_DBC, dbc);
+        SQLFreeHandle(SQL_HANDLE_ENV, env);
+        genResponseReturn(500, "Failed to hash password", response); return 500;
+    }
+    std::string updateSql = "UPDATE users SET passwd = '" + sqlEscape(newPasswdHashed) + "' WHERE id = " + std::to_string(targetId);
     ret = SQLExecDirect(stmt, (SQLCHAR*)updateSql.c_str(), SQL_NTS);
     if (ret != SQL_SUCCESS && ret != SQL_SUCCESS_WITH_INFO) {
         SQLFreeHandle(SQL_HANDLE_STMT, stmt);
